@@ -1,0 +1,154 @@
+{
+    "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+    "name": "Fathom",
+    "patterns": [
+        {
+            "include": "#comments"
+        },
+        {
+            "include": "#keywords"
+        },
+        {
+            "include": "#punctuation"
+        },
+        {
+            "include": "#constants"
+        },
+        {
+            "include": "#variables"
+        },
+        {
+            "include": "#strings"
+        }
+    ],
+    "repository": {
+        "comments": {
+            "patterns": [
+                {
+                    "name": "comment.line.double-slash.fathom",
+                    "match": "//.*\n"
+                }
+            ]
+        },
+        "keywords": {
+            "patterns": [
+                {
+                    "name": "keyword.control.fathom",
+                    "match": "\\b(if|else|match|then)\\b"
+                },
+                {
+                    "name": "keyword.other.fathom",
+                    "match": "\\b(def|fun|let|overlap|where)\\b"
+                },
+                {
+                    "name": "keyword.operator.math.fathom",
+                    "match": "(\\+|-|\\*|/)"
+                },
+                {
+                    "name": "keyword.operator.comparison.fathom",
+                    "match": "(==|!=|<|>|<=|>=)"
+                },
+                {
+                    "name": "keyword.operator.assignment.fathom",
+                    "match": "(=)"
+                },
+                {
+                    "name": "keyword.operator.arrow.skinny.fathom",
+                    "match": "(->)"
+                },
+                {
+                    "name": "keyword.operator.arrow.backwards.skinny.fathom",
+                    "match": "(<-)"
+                },
+                {
+                    "name": "keyword.operator.arrow.fat.fathom",
+                    "match": "(=>)"
+                },
+                {
+                    "name": "keyword.operator.pipe.fathom",
+                    "match": "(\\|)"
+                },
+                {
+                    "name": "keyword.operator.type.fathom",
+                    "match": "(:)"
+                },
+                {
+                    "name": "keyword.operator.dot.fathom",
+                    "match": "(\\.)"
+                }
+            ]
+        },
+        "punctuation": {
+            "patterns": [
+                {
+                    "name": "punctuation.brackets.curly.fathom",
+                    "match": "[{}]"
+                },
+                {
+                    "name": "punctuation.brackets.round.fathom",
+                    "match": "[()]"
+                },
+                {
+                    "name": "punctuation.brackets.square.fathom",
+                    "match": "[\\[\\]]"
+                },
+                {
+                    "name": "punctuation.comma.fathom",
+                    "match": ","
+                },
+                {
+                    "name": "punctuation.semi.fathom",
+                    "match": ";"
+                }
+            ]
+        },
+        "constants": {
+            "patterns": [
+                {
+                    "name": "constant.numeric.decimal.fathom",
+                    "match": "\\b[+-]?[0-9][0-9_]*\\b"
+                },
+                {
+                    "name": "constant.numeric.bin.fathom",
+                    "match": "\\b[+-]?0[bB][0-1][0-1_]*\\b"
+                },
+                {
+                    "name": "constant.numeric.hex.fathom",
+                    "match": "\\b[+-]?0[xX][0-9a-fA-F][0-9a-fA-F_]*\\b"
+                },
+                {
+                    "name": "constant.numeric.bool.fathom",
+                    "match": "\\b(true|false)\\b"
+                },
+                {
+                    "name": "constant.language.fathom",
+                    "match": "\\b(Type)\\b"
+                }
+            ]
+        },
+        "variables": {
+            "patterns": [
+                {
+                    "name": "variable.fathom",
+                    "match": "\\b[a-zA-Z_][a-zA-Z0-9_]*\\b"
+                },
+                {
+                    "name": "variable.hole.fathom",
+                    "match": "\\b\\?[a-zA-Z_][a-zA-Z0-9_]*\\b"
+                }
+            ]
+        },
+        "strings": {
+            "name": "string.quoted.double.fathom",
+            "begin": "\"",
+            "end": "\"",
+            "patterns": [
+                {
+                    "name": "constant.character.escape.fathom",
+                    "match": "\\\\."
+                }
+            ]
+        }
+    },
+    "scopeName": "source.fathom"
+}

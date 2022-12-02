@@ -1,0 +1,34 @@
+{
+  "name": "fathom",
+  "displayName": "Fathom",
+  "description": "Fathom language support for Visual Studio Code",
+  "version": "0.0.1",
+  "engines": {
+    "vscode": "^1.73.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "fathom",
+        "aliases": [
+          "Fathom",
+          "fathom"
+        ],
+        "extensions": [
+          ".fathom"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "fathom",
+        "scopeName": "source.fathom",
+        "path": "./syntaxes/fathom.tmLanguage.json"
+      }
+    ]
+  }
+}
