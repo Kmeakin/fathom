@@ -202,8 +202,8 @@ impl<'arena, 'env> Context<'arena, 'env> {
             return Ok(());
         }
 
-        let value0 = self.elim_env().force(value0);
-        let value1 = self.elim_env().force(value1);
+        let value0 = self.elim_env().force_metas(value0);
+        let value1 = self.elim_env().force_metas(value1);
 
         match (value0.as_ref(), value1.as_ref()) {
             // `ReportedError`s result from errors that have already been
@@ -498,7 +498,7 @@ impl<'arena, 'env> Context<'arena, 'env> {
 
         for elim in spine {
             match elim {
-                Elim::FunApp(_, arg_expr) => match self.elim_env().force(arg_expr).as_ref() {
+                Elim::FunApp(_, arg_expr) => match self.elim_env().force_metas(arg_expr).as_ref() {
                     Value::Stuck(Head::LocalVar(source_var), spine)
                         if spine.is_empty() && self.renaming.set_local(*source_var) => {}
                     Value::Stuck(Head::LocalVar(source_var), _) => {
@@ -540,7 +540,7 @@ impl<'arena, 'env> Context<'arena, 'env> {
         meta_var: Level,
         value: &ArcValue<'arena>,
     ) -> Result<Term<'arena>, RenameError> {
-        let val = self.elim_env().force(value);
+        let val = self.elim_env().force_metas(value);
         let span = val.span();
         match val.as_ref() {
             Value::Stuck(head, spine) => {

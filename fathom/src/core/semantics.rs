@@ -1,9 +1,11 @@
 //! The semantics of the core language, implemented using [normalization by
 //! evaluation](https://en.wikipedia.org/wiki/Normalization_by_evaluation).
 
+use std::cell::RefCell;
 use std::panic::panic_any;
 use std::sync::Arc;
 
+use once_cell::sync::OnceCell;
 use scoped_arena::Scope;
 
 use crate::alloc::SliceVec;
@@ -50,6 +52,53 @@ pub enum Value<'arena> {
 
     /// Constant literals.
     ConstLit(Const),
+}
+
+/// Initialization operation for lazy values.
+///
+/// We need to use a [defunctionalized] representation because Rust does not
+/// allow closures of type `dyn (Clone + FnOnce() -> Arc<Value>)`.
+///
+/// [defunctionalized]: https://en.wikipedia.org/wiki/Defunctionalization
+#[derive(Clone, Debug)]
+enum LazyInit<'arena> {
+    EvalTerm(SharedEnv<ArcValue<'arena>>, &'arena Term<'arena>),
+    ApplyElim(Arc<LazyValue<'arena>>, Elim<'arena>),
+}
+
+#[derive(Debug, Clone)]
+pub struct LazyValue<'arena> {
+    /// Initialization operation. Will be set to `None` if `cell` is forced.
+    init: RefCell<Option<LazyInit<'arena>>>,
+    /// A once-cell to hold the lazily initialized value.
+    cell: OnceCell<ArcValue<'arena>>,
+}
+
+impl<'arena> LazyValue<'arena> {
+    /// Eagerly construct the lazy value.
+    pub fn eager(value: ArcValue<'arena>) -> Self {
+        LazyValue {
+            init: RefCell::new(None),
+            cell: OnceCell::from(value),
+        }
+    }
+
+    /// Create a delayed LazyValue which, when forced, will evaluate `term` in
+    /// `local_exprs`
+    pub fn delay(local_exprs: SharedEnv<ArcValue<'arena>>, term: &'arena Term<'arena>) -> Self {
+        LazyValue {
+            init: RefCell::new(Some(LazyInit::EvalTerm(local_exprs, term))),
+            cell: OnceCell::new(),
+        }
+    }
+
+    /// Lazily apply an elimination.
+    pub fn apply_elim(head: Arc<LazyValue<'arena>>, elim: Elim<'arena>) -> Self {
+        LazyValue {
+            init: RefCell::new(Some(LazyInit::ApplyElim(head, elim))),
+            cell: OnceCell::new(),
+        }
+    }
 }
 
 impl<'arena> Value<'arena> {
@@ -439,7 +488,7 @@ impl<'arena, 'env> ElimEnv<'arena, 'env> {
 
     /// Bring a value up-to-date with any new unification solutions that
     /// might now be present at the head of in the given value.
-    pub fn force(&self, value: &ArcValue<'arena>) -> ArcValue<'arena> {
+    pub fn force_metas(&self, value: &ArcValue<'arena>) -> ArcValue<'arena> {
         let mut forced_value = value.clone();
         // Attempt to force metavariables until we don't see any more.
         while let Value::Stuck(Head::MetaVar(var), spine) = forced_value.as_ref() {
@@ -453,6 +502,27 @@ impl<'arena, 'env> ElimEnv<'arena, 'env> {
             }
         }
         forced_value
+    }
+
+    /// Force the evaluation of a lazy value.
+    pub fn force_lazy(&self, value: &LazyValue<'arena>) -> ArcValue<'arena> {
+        (value.cell)
+            .get_or_init(|| match value.init.replace(None) {
+                Some(LazyInit::EvalTerm(mut local_exprs, term)) => {
+                    self.eval_env(&mut local_exprs).eval(term)
+                }
+                Some(LazyInit::ApplyElim(head, elim)) => match elim {
+                    Elim::RecordProj(label) => {
+                        self.record_proj(self.force_lazy(&head).clone(), label)
+                    }
+                    Elim::FunApp(plicity, arg) => {
+                        self.fun_app(plicity, self.force_lazy(&head).clone(), arg)
+                    }
+                    Elim::ConstMatch(_) => todo!(),
+                },
+                None => panic!("Lazy instance has previously been poisoned"),
+            })
+            .clone()
     }
 
     /// Apply a closure to a value.
@@ -670,7 +740,7 @@ impl<'in_arena, 'env> QuoteEnv<'in_arena, 'env> {
         // NOTE: this copies more than is necessary when `'in_arena == 'out_arena`:
         // for example when copying label slices.
 
-        let value = self.elim_env.force(value);
+        let value = self.elim_env.force_metas(value);
         let span = value.span();
         match value.as_ref() {
             Value::Stuck(head, spine) => spine.iter().fold(
@@ -1095,8 +1165,8 @@ impl<'arena, 'env> ConversionEnv<'arena, 'env> {
     /// [computationally equal]: https://ncatlab.org/nlab/show/equality#computational_equality
     /// [eta-conversion]: https://ncatlab.org/nlab/show/eta-conversion
     pub fn is_equal(&mut self, value0: &ArcValue<'_>, value1: &ArcValue<'_>) -> bool {
-        let value0 = self.elim_env.force(value0);
-        let value1 = self.elim_env.force(value1);
+        let value0 = self.elim_env.force_metas(value0);
+        let value1 = self.elim_env.force_metas(value1);
 
         match (value0.as_ref(), value1.as_ref()) {
             // `ReportedError`s result from errors that have already been
@@ -1352,5 +1422,6 @@ mod tests {
     #[cfg(target_pointer_width = "64")]
     fn value_size() {
         assert_eq!(std::mem::size_of::<Value>(), 72);
+        assert_eq!(std::mem::size_of::<LazyValue>(), 112);
     }
 }

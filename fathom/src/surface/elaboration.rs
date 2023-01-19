@@ -616,8 +616,8 @@ impl<'interner, 'arena> Context<'interner, 'arena> {
         to: &ArcValue<'arena>,
     ) -> core::Term<'arena> {
         let span = expr.span();
-        let from = self.elim_env().force(from);
-        let to = self.elim_env().force(to);
+        let from = self.elim_env().force_metas(from);
+        let to = self.elim_env().force_metas(to);
 
         match (from.as_ref(), to.as_ref()) {
             // Coerce format descriptions to their representation types by
@@ -1009,7 +1009,7 @@ impl<'interner, 'arena> Context<'interner, 'arena> {
         expected_type: &ArcValue<'arena>,
     ) -> core::Term<'arena> {
         let file_range = self.file_range(surface_term.range());
-        let expected_type = self.elim_env().force(expected_type);
+        let expected_type = self.elim_env().force_metas(expected_type);
 
         match (surface_term, expected_type.as_ref()) {
             (Term::Paren(_, term), _) => self.check(term, &expected_type),
@@ -1322,7 +1322,7 @@ impl<'interner, 'arena> Context<'interner, 'arena> {
     ) -> (core::Term<'arena>, ArcValue<'arena>) {
         let file_range = self.file_range(range);
         while let Value::FunType(Plicity::Implicit, name, param_type, body_type) =
-            self.elim_env().force(&r#type).as_ref()
+            self.elim_env().force_metas(&r#type).as_ref()
         {
             let source = MetaSource::ImplicitArg(file_range, *name);
             let arg_term = self.push_unsolved_term(source, param_type.clone());
@@ -1528,7 +1528,7 @@ impl<'interner, 'arena> Context<'interner, 'arena> {
                 let (mut head_expr, mut head_type) = self.synth(head_expr);
 
                 for arg in *args {
-                    head_type = self.elim_env().force(&head_type);
+                    head_type = self.elim_env().force_metas(&head_type);
 
                     match arg.plicity {
                         Plicity::Implicit => {}
@@ -1653,7 +1653,7 @@ impl<'interner, 'arena> Context<'interner, 'arena> {
                 let (mut head_expr, mut head_type) = self.synth_and_insert_implicit_apps(head_expr);
 
                 'labels: for (label_range, proj_label) in *labels {
-                    head_type = self.elim_env().force(&head_type);
+                    head_type = self.elim_env().force_metas(&head_type);
                     match (&head_expr, head_type.as_ref()) {
                         // Ensure that the head of the projection is a record
                         (_, Value::RecordType(labels, types)) => {
@@ -1784,7 +1784,7 @@ impl<'interner, 'arena> Context<'interner, 'arena> {
         let file_range = self.file_range(range);
         match params.split_first() {
             Some((param, next_params)) => {
-                let body_type = self.elim_env().force(expected_type);
+                let body_type = self.elim_env().force_metas(expected_type);
                 match body_type.as_ref() {
                     Value::FunType(param_plicity, _, param_type, next_body_type)
                         if param.plicity == *param_plicity =>
@@ -1915,8 +1915,8 @@ impl<'interner, 'arena> Context<'interner, 'arena> {
         // de-sugar into function application
         let (lhs_expr, lhs_type) = self.synth_and_insert_implicit_apps(lhs);
         let (rhs_expr, rhs_type) = self.synth_and_insert_implicit_apps(rhs);
-        let lhs_type = self.elim_env().force(&lhs_type);
-        let rhs_type = self.elim_env().force(&rhs_type);
+        let lhs_type = self.elim_env().force_metas(&lhs_type);
+        let rhs_type = self.elim_env().force_metas(&rhs_type);
         let operand_types = Option::zip(lhs_type.match_prim_spine(), rhs_type.match_prim_spine());
 
         let (fun, body_type) = match (op, operand_types) {
@@ -2260,7 +2260,7 @@ impl<'interner, 'arena> Context<'interner, 'arena> {
         let match_info = MatchInfo {
             range,
             scrutinee: self.synth_scrutinee(scrutinee_expr),
-            expected_type: self.elim_env().force(expected_type),
+            expected_type: self.elim_env().force_metas(expected_type),
         };
 
         self.elab_match(&match_info, true, equations.iter())
