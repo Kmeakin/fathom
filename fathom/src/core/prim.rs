@@ -4,7 +4,7 @@ use std::sync::Arc;
 use fxhash::FxHashMap;
 use scoped_arena::Scope;
 
-use crate::core::semantics::{ArcValue, Elim, ElimEnv, Head, Value};
+use crate::core::semantics::{ArcValue, Elim, ElimEnv, Head, LazyValue, Value};
 use crate::core::{self, Const, Plicity, Prim, UIntStyle};
 use crate::env::{self, SharedEnv, UniqueEnv};
 use crate::source::{Span, Spanned, StringId, StringInterner};
@@ -585,13 +585,13 @@ macro_rules! step {
 // TODO: Should we merge the spans of the param idents to produce the body span?
 macro_rules! const_step {
     ([$($param:ident : $Input:ident),*] => $body:expr) => {
-        step!(_, [$($param),*] => match ($($param.as_ref(),)*) {
+        step!(env, [$($param),*] => match ($(env.force_lazy($param).as_ref(),)*) {
             ($(Value::ConstLit(Const::$Input($param, ..)),)*) => Spanned::empty(Arc::new(Value::ConstLit($body))),
             _ => return None,
         })
     };
     ([$($param:ident , $style:ident : $Input:ident),*] => $body:expr) => {
-        step!(_, [$($param),*] => match ($($param.as_ref(),)*) {
+        step!(env, [$($param),*] => match ($(env.force_lazy($param).as_ref(),)*) {
             ($(Value::ConstLit(Const::$Input($param, $style)),)*) => Spanned::empty(Arc::new(Value::ConstLit($body))),
             _ => return None,
         })
@@ -619,21 +619,18 @@ pub fn repr(prim: Prim) -> Step {
         Prim::FormatF32Le => step!(_, [] => Spanned::empty(Arc::new(Value::prim(Prim::F32Type, [])))),
         Prim::FormatF64Be => step!(_, [] => Spanned::empty(Arc::new(Value::prim(Prim::F64Type, [])))),
         Prim::FormatF64Le => step!(_, [] => Spanned::empty(Arc::new(Value::prim(Prim::F64Type, [])))),
-        Prim::FormatRepeatLen8 => step!(env, [len, elem] => Spanned::empty(Arc::new(Value::prim(Prim::Array8Type, [len.clone(), env.format_repr(elem)])))),
-        Prim::FormatRepeatLen16 => step!(env, [len, elem] => Spanned::empty(Arc::new(Value::prim(Prim::Array16Type, [len.clone(), env.format_repr(elem)])))),
-        Prim::FormatRepeatLen32 => step!(env, [len, elem] => Spanned::empty(Arc::new(Value::prim(Prim::Array32Type, [len.clone(), env.format_repr(elem)])))),
-        Prim::FormatRepeatLen64 => step!(env, [len, elem] => Spanned::empty(Arc::new(Value::prim(Prim::Array64Type, [len.clone(), env.format_repr(elem)])))),
-        Prim::FormatLimit8 => step!(env, [_, elem] => env.format_repr(elem)),
-        Prim::FormatLimit16 => step!(env, [_, elem] => env.format_repr(elem)),
-        Prim::FormatLimit32 => step!(env, [_, elem] => env.format_repr(elem)),
-        Prim::FormatLimit64 => step!(env, [_, elem] => env.format_repr(elem)),
-        Prim::FormatRepeatUntilEnd => step!(env, [elem] => Spanned::empty(Arc::new(Value::prim(Prim::ArrayType, [env.format_repr(elem)])))),
-        Prim::FormatLink => step!(_, [_, elem] => Spanned::empty(Arc::new(Value::prim(Prim::RefType, [elem.clone()])))),
-        Prim::FormatDeref => step!(env, [elem, _] => env.format_repr(elem)),
+        Prim::FormatRepeatLen8  => step!(env, [len, elem] => Spanned::empty(Arc::new(Value::prim(Prim::Array8Type,  [env.force_lazy(len), env.format_repr(&env.force_lazy(elem))])))),
+        Prim::FormatRepeatLen16 => step!(env, [len, elem] => Spanned::empty(Arc::new(Value::prim(Prim::Array16Type, [env.force_lazy(len), env.format_repr(&env.force_lazy(elem))])))),
+        Prim::FormatRepeatLen32 => step!(env, [len, elem] => Spanned::empty(Arc::new(Value::prim(Prim::Array32Type, [env.force_lazy(len), env.format_repr(&env.force_lazy(elem))])))),
+        Prim::FormatRepeatLen64 => step!(env, [len, elem] => Spanned::empty(Arc::new(Value::prim(Prim::Array64Type, [env.force_lazy(len), env.format_repr(&env.force_lazy(elem))])))),
+        Prim::FormatLimit8 | Prim::FormatLimit16 | Prim::FormatLimit32 | Prim::FormatLimit64 => step!(env, [_, elem] => env.format_repr(&env.force_lazy(elem))),
+        Prim::FormatRepeatUntilEnd => step!(env, [elem] => Spanned::empty(Arc::new(Value::prim(Prim::ArrayType, [env.format_repr(&env.force_lazy(elem))])))),
+        Prim::FormatLink => step!(env, [_, elem] => Spanned::empty(Arc::new(Value::prim(Prim::RefType, [env.force_lazy(elem)])))),
+        Prim::FormatDeref => step!(env, [elem, _] => env.format_repr(&env.force_lazy(elem))),
         Prim::FormatStreamPos => step!(_, [] => Spanned::empty(Arc::new(Value::prim(Prim::PosType, [])))),
-        Prim::FormatSucceed => step!(_, [elem, _] => elem.clone()),
+        Prim::FormatSucceed => step!(env, [elem, _] => env.force_lazy(elem)),
         Prim::FormatFail => step!(_, [] => Spanned::empty(Arc::new(Value::prim(Prim::VoidType, [])))),
-        Prim::FormatUnwrap => step!(_, [elem, _] => elem.clone()),
+        Prim::FormatUnwrap => step!(env, [elem, _] => env.force_lazy(elem)),
         Prim::ReportedError => step!(_, [] => Spanned::empty(Arc::new(Value::prim(Prim::ReportedError, [])))),
         _ => |_, _| None,
     }
@@ -649,7 +646,7 @@ pub fn step(prim: Prim) -> Step {
         #[allow(unreachable_code)]
         Prim::Absurd => step!(_, [_, _] => panic!("Constructed an element of `Void`")),
 
-        Prim::FormatRepr => step!(env, [format] => env.format_repr(format)),
+        Prim::FormatRepr => step!(env, [format] => env.format_repr(&env.force_lazy(format))),
 
         Prim::BoolEq => const_step!([x: Bool, y: Bool] => Const::Bool(x == y)),
         Prim::BoolNeq => const_step!([x: Bool, y: Bool] => Const::Bool(x != y)),
@@ -783,22 +780,21 @@ pub fn step(prim: Prim) -> Step {
         Prim::S64UAbs => const_step!([x: S64] => Const::U64(i64::unsigned_abs(*x), UIntStyle::Decimal)),
 
         Prim::OptionFold => step!(env, [_, _, on_none, on_some, option] => {
-            match option.match_prim_spine()? {
+            match env.force_lazy(option).match_prim_spine()? {
                 (Prim::OptionSome, [_, Elim::FunApp(Plicity::Explicit, value)]) => {
-                    env.fun_app(Plicity::Explicit, on_some.clone(), value.clone())
+                    env.fun_app(Plicity::Explicit, env.force_lazy(on_some), value)
                 },
-                (Prim::OptionNone, [_]) => on_none.clone(),
+                (Prim::OptionNone, [_]) => env.force_lazy(on_none),
                 _ => return None,
             }
         }),
 
         Prim::Array8Find | Prim::Array16Find | Prim::Array32Find | Prim::Array64Find => {
-            step!(env, [_, elem_type, pred, array] => match array.as_ref() {
+            step!(env, [_, elem_type, pred, array] => match env.force_lazy(array).as_ref() {
                 Value::ArrayLit(elems) => {
                     for elem in elems {
-                        match env.fun_app(
-                            Plicity::Explicit,
-                            pred.clone(), elem.clone()).as_ref() {
+                        let elem = LazyValue::eager(elem.clone());
+                        match env.fun_app(Plicity::Explicit, env.force_lazy(pred), &elem).as_ref() {
                             Value::ConstLit(Const::Bool(true)) => {
                                 return Some(Spanned::empty(Arc::new(Value::Stuck(
                                     Head::Prim(Prim::OptionSome),
@@ -822,9 +818,9 @@ pub fn step(prim: Prim) -> Step {
         }
 
         Prim::Array8Index | Prim::Array16Index | Prim::Array32Index | Prim::Array64Index => {
-            step!(_, [_, _, index, array] => match array.as_ref() {
+            step!(env, [_, _, index, array] => match env.force_lazy(array).as_ref() {
                 Value::ArrayLit(elems) => {
-                    let index = match (index).as_ref() {
+                    let index = match env.force_lazy(index).as_ref() {
                         Value::ConstLit(Const::U8(index, _)) => Some(usize::from(*index)),
                         Value::ConstLit(Const::U16(index, _)) => Some(usize::from(*index)),
                         Value::ConstLit(Const::U32(index, _)) => usize::try_from(*index).ok(),

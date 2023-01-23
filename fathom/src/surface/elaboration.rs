@@ -268,9 +268,9 @@ pub struct Context<'interner, 'arena> {
     scope: &'arena Scope<'arena>,
 
     // Commonly used values, cached to increase sharing.
-    universe: ArcValue<'static>,
-    format_type: ArcValue<'static>,
-    bool_type: ArcValue<'static>,
+    universe: ArcValue<'arena>,
+    format_type: ArcValue<'arena>,
+    bool_type: ArcValue<'arena>,
 
     /// Primitive environment.
     prim_env: prim::Env<'arena>,
@@ -451,7 +451,7 @@ impl<'interner, 'arena> Context<'interner, 'arena> {
         )
     }
 
-    fn pretty_print_value(&mut self, value: &ArcValue<'_>) -> String {
+    fn pretty_print_value(&mut self, value: &ArcValue<'arena>) -> String {
         let scope = self.scope;
 
         let term = self.quote_env().unfolding_metas().quote(scope, value);
@@ -1209,7 +1209,10 @@ impl<'interner, 'arena> Context<'interner, 'arena> {
                     }
                 };
 
-                let len = match len_value.map(|val| val.as_ref()) {
+                let len_value = len_value.map(|len_value| self.elim_env().force_lazy(len_value));
+                let elem_type = self.elim_env().force_lazy(elem_type);
+
+                let len = match len_value.as_ref().map(|val| val.as_ref()) {
                     None => Some(elem_exprs.len() as u64),
                     Some(Value::ConstLit(Const::U8(len, _))) => Some(*len as u64),
                     Some(Value::ConstLit(Const::U16(len, _))) => Some(*len as u64),
@@ -1225,17 +1228,17 @@ impl<'interner, 'arena> Context<'interner, 'arena> {
                     Some(len) if elem_exprs.len() as u64 == len => core::Term::ArrayLit(
                         file_range.into(),
                         self.scope.to_scope_from_iter(
-                            (elem_exprs.iter()).map(|elem_expr| self.check(elem_expr, elem_type)),
+                            (elem_exprs.iter()).map(|elem_expr| self.check(elem_expr, &elem_type)),
                         ),
                     ),
                     _ => {
                         // Check the array elements anyway in order to report
                         // any errors inside the literal as well.
                         for elem_expr in *elem_exprs {
-                            self.check(elem_expr, elem_type);
+                            self.check(elem_expr, &elem_type);
                         }
 
-                        let expected_len = self.pretty_print_value(len_value.unwrap());
+                        let expected_len = self.pretty_print_value(&len_value.unwrap());
                         self.push_message(Message::MismatchedArrayLength {
                             range: file_range,
                             found_len: elem_exprs.len(),

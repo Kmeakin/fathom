@@ -63,7 +63,7 @@ pub enum Value<'arena> {
 #[derive(Clone, Debug)]
 enum LazyInit<'arena> {
     EvalTerm(SharedEnv<ArcValue<'arena>>, &'arena Term<'arena>),
-    ApplyElim(Arc<LazyValue<'arena>>, Elim<'arena>),
+    ApplyElim(Arc<LazyValue<'arena>>, Arc<Elim<'arena>>),
 }
 
 #[derive(Debug, Clone)]
@@ -95,7 +95,7 @@ impl<'arena> LazyValue<'arena> {
     /// Lazily apply an elimination.
     pub fn apply_elim(head: Arc<LazyValue<'arena>>, elim: Elim<'arena>) -> Self {
         LazyValue {
-            init: RefCell::new(Some(LazyInit::ApplyElim(head, elim))),
+            init: RefCell::new(Some(LazyInit::ApplyElim(head, Arc::new(elim)))),
             cell: OnceCell::new(),
         }
     }
@@ -105,7 +105,7 @@ impl<'arena> Value<'arena> {
     pub fn prim(prim: Prim, params: impl IntoIterator<Item = ArcValue<'arena>>) -> Value<'arena> {
         let params = params
             .into_iter()
-            .map(|arg| Elim::FunApp(Plicity::Explicit, arg))
+            .map(|arg| Elim::FunApp(Plicity::Explicit, LazyValue::eager(arg)))
             .collect();
         Value::Stuck(Head::Prim(prim), params)
     }
@@ -146,7 +146,7 @@ pub enum Head {
 #[derive(Debug, Clone)]
 pub enum Elim<'arena> {
     /// Function applications.
-    FunApp(Plicity, ArcValue<'arena>),
+    FunApp(Plicity, LazyValue<'arena>),
     /// Record projections.
     RecordProj(StringId),
     /// Match on a constant.
@@ -308,6 +308,10 @@ impl<'arena, 'env> EvalEnv<'arena, 'env> {
         }
     }
 
+    fn delay(&self, term: &'arena Term<'arena>) -> LazyValue<'arena> {
+        LazyValue::delay(self.local_exprs.clone(), term)
+    }
+
     fn quote_env(&self) -> QuoteEnv<'arena, 'env> {
         QuoteEnv::new(self.elim_env, self.local_exprs.len())
     }
@@ -377,8 +381,8 @@ impl<'arena, 'env> EvalEnv<'arena, 'env> {
             ),
             Term::FunApp(span, plicity, head_expr, arg_expr) => {
                 let head_expr = self.eval(head_expr);
-                let arg_expr = self.eval(arg_expr);
-                Spanned::merge(*span, self.elim_env.fun_app(*plicity, head_expr, arg_expr))
+                let arg_expr = self.delay(arg_expr);
+                Spanned::merge(*span, self.elim_env.fun_app(*plicity, head_expr, &arg_expr))
             }
 
             Term::RecordType(span, labels, types) => {
@@ -434,10 +438,11 @@ impl<'arena, 'env> EvalEnv<'arena, 'env> {
         for (info, expr) in Iterator::zip(infos.iter(), self.local_exprs.iter()) {
             head_expr = match info {
                 LocalInfo::Def => head_expr,
-                LocalInfo::Param => {
-                    self.elim_env
-                        .fun_app(Plicity::Explicit, head_expr, expr.clone())
-                }
+                LocalInfo::Param => self.elim_env.fun_app(
+                    Plicity::Explicit,
+                    head_expr,
+                    &LazyValue::eager(expr.clone()),
+                ),
             };
         }
         head_expr
@@ -511,12 +516,10 @@ impl<'arena, 'env> ElimEnv<'arena, 'env> {
                 Some(LazyInit::EvalTerm(mut local_exprs, term)) => {
                     self.eval_env(&mut local_exprs).eval(term)
                 }
-                Some(LazyInit::ApplyElim(head, elim)) => match elim {
-                    Elim::RecordProj(label) => {
-                        self.record_proj(self.force_lazy(&head).clone(), label)
-                    }
+                Some(LazyInit::ApplyElim(head, elim)) => match elim.as_ref() {
+                    Elim::RecordProj(label) => self.record_proj(self.force_lazy(&head), *label),
                     Elim::FunApp(plicity, arg) => {
-                        self.fun_app(plicity, self.force_lazy(&head).clone(), arg)
+                        self.fun_app(*plicity, self.force_lazy(&head), arg)
                     }
                     Elim::ConstMatch(_) => todo!(),
                 },
@@ -587,18 +590,18 @@ impl<'arena, 'env> ElimEnv<'arena, 'env> {
         &self,
         arg_plicity: Plicity,
         mut head_expr: ArcValue<'arena>,
-        arg_expr: ArcValue<'arena>,
+        arg_expr: &LazyValue<'arena>,
     ) -> ArcValue<'arena> {
         match Arc::make_mut(&mut head_expr) {
             // Beta-reduction
             Value::FunLit(fun_plicity, _, body_expr) => {
                 assert_eq!(arg_plicity, *fun_plicity, "Plicities must be equal");
                 // FIXME: use span from head/arg exprs?
-                self.apply_closure(body_expr, arg_expr)
+                self.apply_closure(body_expr, self.force_lazy(arg_expr))
             }
             // The computation is stuck, preventing further reduction
             Value::Stuck(head, spine) => {
-                spine.push(Elim::FunApp(arg_plicity, arg_expr));
+                spine.push(Elim::FunApp(arg_plicity, arg_expr.clone()));
                 match head {
                     Head::Prim(prim) => prim::step(*prim)(self, spine).unwrap_or(head_expr),
                     _ => head_expr,
@@ -671,7 +674,7 @@ impl<'arena, 'env> ElimEnv<'arena, 'env> {
     /// Apply an expression to an elimination spine.
     fn apply_spine(&self, head_expr: ArcValue<'arena>, spine: &[Elim<'arena>]) -> ArcValue<'arena> {
         spine.iter().fold(head_expr, |head_expr, elim| match elim {
-            Elim::FunApp(plicity, arg_expr) => self.fun_app(*plicity, head_expr, arg_expr.clone()),
+            Elim::FunApp(plicity, arg_expr) => self.fun_app(*plicity, head_expr, arg_expr),
             Elim::RecordProj(label) => self.record_proj(head_expr, *label),
             Elim::ConstMatch(split) => self.const_match(head_expr, split.clone()),
         })
@@ -750,7 +753,7 @@ impl<'in_arena, 'env> QuoteEnv<'in_arena, 'env> {
                         span,
                         *plicity,
                         scope.to_scope(head_expr),
-                        scope.to_scope(self.quote(scope, arg_expr)),
+                        scope.to_scope(self.quote(scope, &self.elim_env.force_lazy(arg_expr))),
                     ),
                     Elim::RecordProj(label) => {
                         Term::RecordProj(span, scope.to_scope(head_expr), *label)
@@ -1050,10 +1053,11 @@ impl<'arena, 'env> EvalEnv<'arena, 'env> {
                         scope.to_scope(head_expr),
                         scope.to_scope(self.unfold_metas(scope, arg_expr)),
                     )),
-                    TermOrValue::Value(head_expr) => {
-                        let arg_expr = self.eval(arg_expr);
-                        TermOrValue::Value(self.elim_env.fun_app(*plicity, head_expr, arg_expr))
-                    }
+                    TermOrValue::Value(head_expr) => TermOrValue::Value(self.elim_env.fun_app(
+                        *plicity,
+                        head_expr,
+                        &self.delay(arg_expr),
+                    )),
                 }
             }
             Term::RecordProj(span, head_expr, label) => {
@@ -1164,7 +1168,7 @@ impl<'arena, 'env> ConversionEnv<'arena, 'env> {
     ///
     /// [computationally equal]: https://ncatlab.org/nlab/show/equality#computational_equality
     /// [eta-conversion]: https://ncatlab.org/nlab/show/eta-conversion
-    pub fn is_equal(&mut self, value0: &ArcValue<'_>, value1: &ArcValue<'_>) -> bool {
+    pub fn is_equal(&mut self, value0: &ArcValue<'arena>, value1: &ArcValue<'arena>) -> bool {
         let value0 = self.elim_env.force_metas(value0);
         let value1 = self.elim_env.force_metas(value1);
 
@@ -1238,12 +1242,16 @@ impl<'arena, 'env> ConversionEnv<'arena, 'env> {
     }
 
     /// Check that two elimination spines are equal.
-    pub fn is_equal_spines(&mut self, spine0: &[Elim<'_>], spine1: &[Elim<'_>]) -> bool {
+    pub fn is_equal_spines(&mut self, spine0: &[Elim<'arena>], spine1: &[Elim<'arena>]) -> bool {
         spine0.len() == spine1.len()
             && Iterator::zip(spine0.iter(), spine1.iter()).all(|(elim0, elim1)| {
                 match (elim0, elim1) {
                     (Elim::FunApp(plicity0, expr0), Elim::FunApp(plicity1, expr1)) => {
-                        plicity0 == plicity1 && self.is_equal(expr0, expr1)
+                        plicity0 == plicity1
+                            && self.is_equal(
+                                &self.elim_env.force_lazy(expr0),
+                                &self.elim_env.force_lazy(expr1),
+                            )
                     }
                     (Elim::RecordProj(label0), Elim::RecordProj(label1)) => label0 == label1,
                     (Elim::ConstMatch(branches0), Elim::ConstMatch(branches1)) => {
@@ -1255,7 +1263,11 @@ impl<'arena, 'env> ConversionEnv<'arena, 'env> {
     }
 
     /// Check that two [closures][Closure] are equal.
-    pub fn is_equal_closures(&mut self, closure0: &Closure<'_>, closure1: &Closure<'_>) -> bool {
+    pub fn is_equal_closures(
+        &mut self,
+        closure0: &Closure<'arena>,
+        closure1: &Closure<'arena>,
+    ) -> bool {
         let var = Spanned::empty(Arc::new(Value::local_var(self.local_exprs.next_level())));
         let value0 = self.elim_env.apply_closure(closure0, var.clone());
         let value1 = self.elim_env.apply_closure(closure1, var);
@@ -1270,8 +1282,8 @@ impl<'arena, 'env> ConversionEnv<'arena, 'env> {
     /// Check that two [telescopes][Telescope] are equal.
     pub fn is_equal_telescopes(
         &mut self,
-        telescope0: &Telescope<'_>,
-        telescope1: &Telescope<'_>,
+        telescope0: &Telescope<'arena>,
+        telescope1: &Telescope<'arena>,
     ) -> bool {
         if telescope0.len() != telescope1.len() {
             return false;
@@ -1303,8 +1315,8 @@ impl<'arena, 'env> ConversionEnv<'arena, 'env> {
     /// Check that two [constant branches][Branches] are equal.
     fn is_equal_branches<P: PartialEq + Copy>(
         &mut self,
-        branches0: &Branches<'_, P>,
-        branches1: &Branches<'_, P>,
+        branches0: &Branches<'arena, P>,
+        branches1: &Branches<'arena, P>,
     ) -> bool {
         use SplitBranches::*;
 
@@ -1340,11 +1352,12 @@ impl<'arena, 'env> ConversionEnv<'arena, 'env> {
     fn is_equal_fun_lit(
         &mut self,
         plicity: Plicity,
-        body_expr: &Closure<'_>,
-        value: &ArcValue<'_>,
+        body_expr: &Closure<'arena>,
+        value: &ArcValue<'arena>,
     ) -> bool {
         let var = Spanned::empty(Arc::new(Value::local_var(self.local_exprs.next_level())));
-        let value = self.elim_env.fun_app(plicity, value.clone(), var.clone());
+        let arg = LazyValue::eager(var.clone());
+        let value = self.elim_env.fun_app(plicity, value.clone(), &arg);
         let body_expr = self.elim_env.apply_closure(body_expr, var);
 
         self.push_local();
@@ -1362,8 +1375,8 @@ impl<'arena, 'env> ConversionEnv<'arena, 'env> {
     fn is_equal_record_lit(
         &mut self,
         labels: &[StringId],
-        exprs: &[ArcValue<'_>],
-        value: &ArcValue<'_>,
+        exprs: &[ArcValue<'arena>],
+        value: &ArcValue<'arena>,
     ) -> bool {
         Iterator::zip(labels.iter(), exprs.iter()).all(|(label, expr)| {
             let field_value = self.elim_env.record_proj(value.clone(), *label);
@@ -1422,6 +1435,6 @@ mod tests {
     #[cfg(target_pointer_width = "64")]
     fn value_size() {
         assert_eq!(std::mem::size_of::<Value>(), 72);
-        assert_eq!(std::mem::size_of::<LazyValue>(), 112);
+        assert_eq!(std::mem::size_of::<LazyValue>(), 80);
     }
 }
