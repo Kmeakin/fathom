@@ -406,6 +406,8 @@ impl<'arena, 'data> Context<'arena, 'data> {
     ) -> Result<ArcValue<'arena>, ReadError<'arena>> {
         use crate::core::semantics::Elim::FunApp;
 
+        let force = |expr|  self.elim_env().force_lazy(expr);
+
         match (prim, slice) {
             (Prim::FormatU8, []) => read_const(reader, span, read_u8, |num| Const::U8(num, UIntStyle::Decimal)),
             (Prim::FormatU16Be, []) => read_const(reader, span, read_u16be, |num| Const::U16(num, UIntStyle::Decimal)),
@@ -425,22 +427,18 @@ impl<'arena, 'data> Context<'arena, 'data> {
             (Prim::FormatF32Le, []) => read_const(reader, span, read_f32le, Const::F32),
             (Prim::FormatF64Be, []) => read_const(reader, span, read_f64be, Const::F64),
             (Prim::FormatF64Le, []) => read_const(reader, span, read_f64le, Const::F64),
-            (Prim::FormatRepeatLen8, [FunApp(_, len), FunApp(_, format)]) => self.read_repeat_len(reader, span, len, format),
-            (Prim::FormatRepeatLen16, [FunApp(_, len), FunApp(_, format)]) => self.read_repeat_len(reader, span, len, format),
-            (Prim::FormatRepeatLen32, [FunApp(_, len), FunApp(_, format)]) => self.read_repeat_len(reader, span, len, format),
-            (Prim::FormatRepeatLen64, [FunApp(_, len), FunApp(_, format)]) => self.read_repeat_len(reader, span, len, format),
-            (Prim::FormatRepeatUntilEnd, [FunApp(_,format)]) => self.read_repeat_until_end(reader, format),
-            (Prim::FormatLimit8, [FunApp(_, limit), FunApp(_, format)]) => self.read_limit(reader, limit, format),
-            (Prim::FormatLimit16, [FunApp(_, limit), FunApp(_, format)]) => self.read_limit(reader, limit, format),
-            (Prim::FormatLimit32, [FunApp(_, limit), FunApp(_, format)]) => self.read_limit(reader, limit, format),
-            (Prim::FormatLimit64, [FunApp(_, limit), FunApp(_, format)]) => self.read_limit(reader, limit, format),
-            (Prim::FormatLink, [FunApp(_, pos), FunApp(_, format)]) => self.read_link(span, pos, format),
-            (Prim::FormatDeref, [FunApp(_, format), FunApp(_, r#ref)]) => self.read_deref(format, r#ref),
+            (Prim::FormatRepeatLen8| Prim::FormatRepeatLen16 | Prim::FormatRepeatLen32 | Prim::FormatRepeatLen64,
+                [FunApp(_, len), FunApp(_, format)]) => self.read_repeat_len(reader, span, &force(len), &force(format)),
+            (Prim::FormatRepeatUntilEnd, [FunApp(_,format)]) => self.read_repeat_until_end(reader, &force(format)),
+            (Prim::FormatLimit8 | Prim::FormatLimit16 | Prim::FormatLimit32 | Prim::FormatLimit64,
+                [FunApp(_, limit), FunApp(_, format)]) => self.read_limit(reader,&force(limit) , &force(format)),
+            (Prim::FormatLink, [FunApp(_, pos), FunApp(_, format)]) => self.read_link(span, &force(pos), &force(format)),
+            (Prim::FormatDeref, [FunApp(_, format), FunApp(_, r#ref)]) => self.read_deref(&force(format), &force(r#ref)),
             (Prim::FormatStreamPos, []) => read_stream_pos(reader, span),
-            (Prim::FormatSucceed, [_, FunApp(_, elem)]) => Ok(elem.clone()),
+            (Prim::FormatSucceed, [_, FunApp(_, elem)]) => Ok(force(elem)),
             (Prim::FormatFail, []) => Err(ReadError::ReadFailFormat(span)),
-            (Prim::FormatUnwrap, [_, FunApp(_, option)]) => match option.match_prim_spine() {
-                Some((Prim::OptionSome, [_, FunApp(_, elem)])) => Ok(elem.clone()),
+            (Prim::FormatUnwrap, [_, FunApp(_, option)]) => match force(option).match_prim_spine() {
+                Some((Prim::OptionSome, [_, FunApp(_, elem)])) => Ok(force(elem)),
                 Some((Prim::OptionNone, [_])) => Err(ReadError::UnwrappedNone(span)),
                 _ => Err(ReadError::InvalidValue(span)),
             },
@@ -557,7 +555,7 @@ impl<'arena, 'data> Context<'arena, 'data> {
     fn lookup_ref<'context>(
         &'context self,
         pos: usize,
-        format: &ArcValue<'_>,
+        format: &ArcValue<'arena>,
     ) -> Option<&'context ParsedRef<'arena>> {
         // NOTE: The number of calls to `semantics::ConversionEnv::is_equal`
         // when looking up cached references is a bit of a pain. If this ever

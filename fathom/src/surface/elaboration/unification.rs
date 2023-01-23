@@ -21,7 +21,7 @@ use scoped_arena::Scope;
 
 use crate::alloc::SliceVec;
 use crate::core::semantics::{
-    self, ArcValue, Branches, Closure, Elim, Head, SplitBranches, Telescope, Value,
+    self, ArcValue, Branches, Closure, Elim, Head, LazyValue, SplitBranches, Telescope, Value,
 };
 use crate::core::{Prim, Term};
 use crate::env::{EnvLen, Index, Level, SharedEnv, SliceEnv, UniqueEnv};
@@ -323,7 +323,10 @@ impl<'arena, 'env> Context<'arena, 'env> {
                 (Elim::FunApp(plicity0, arg_expr0), Elim::FunApp(plicity1, arg_expr1))
                     if plicity0 == plicity1 =>
                 {
-                    self.unify(arg_expr0, arg_expr1)?;
+                    self.unify(
+                        &self.elim_env().force_lazy(arg_expr0),
+                        &self.elim_env().force_lazy(arg_expr1),
+                    )?;
                 }
                 (Elim::RecordProj(label0), Elim::RecordProj(label1)) if label0 == label1 => {}
                 (Elim::ConstMatch(branches0), Elim::ConstMatch(branches1)) => {
@@ -434,7 +437,8 @@ impl<'arena, 'env> Context<'arena, 'env> {
         value: &ArcValue<'arena>,
     ) -> Result<(), Error> {
         let var = Spanned::empty(Arc::new(Value::local_var(self.local_exprs.next_level())));
-        let value = self.elim_env().fun_app(plicity, value.clone(), var.clone());
+        let arg = Arc::new(LazyValue::eager(var.clone()));
+        let value = self.elim_env().fun_app(plicity, value.clone(), &arg);
         let body_expr = self.elim_env().apply_closure(body_expr, var);
 
         self.local_exprs.push();
@@ -499,14 +503,17 @@ impl<'arena, 'env> Context<'arena, 'env> {
 
         for elim in spine {
             match elim {
-                Elim::FunApp(_, arg_expr) => match self.elim_env().force_metas(arg_expr).as_ref() {
-                    Value::Stuck(Head::LocalVar(source_var), spine)
-                        if spine.is_empty() && self.renaming.set_local(*source_var) => {}
-                    Value::Stuck(Head::LocalVar(source_var), _) => {
-                        return Err(SpineError::NonLinearSpine(*source_var))
+                Elim::FunApp(_, arg_expr) => {
+                    let arg_expr = self.elim_env().force_lazy(arg_expr);
+                    match self.elim_env().force_metas(&arg_expr).as_ref() {
+                        Value::Stuck(Head::LocalVar(source_var), spine)
+                            if spine.is_empty() && self.renaming.set_local(*source_var) => {}
+                        Value::Stuck(Head::LocalVar(source_var), _) => {
+                            return Err(SpineError::NonLinearSpine(*source_var))
+                        }
+                        _ => return Err(SpineError::NonLocalFunApp),
                     }
-                    _ => return Err(SpineError::NonLocalFunApp),
-                },
+                }
                 Elim::RecordProj(label) => return Err(SpineError::RecordProj(*label)),
                 Elim::ConstMatch(_) => return Err(SpineError::ConstMatch),
             }
@@ -563,7 +570,9 @@ impl<'arena, 'env> Context<'arena, 'env> {
                             span,
                             *plicity,
                             self.scope.to_scope(head_expr),
-                            self.scope.to_scope(self.rename(meta_var, arg_expr)?),
+                            self.scope.to_scope(
+                                self.rename(meta_var, &self.elim_env().force_lazy(arg_expr))?,
+                            ),
                         ),
                         Elim::RecordProj(label) => {
                             Term::RecordProj(span, self.scope.to_scope(head_expr), *label)

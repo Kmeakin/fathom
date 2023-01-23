@@ -443,8 +443,8 @@ impl<'surface, 'core> Driver<'surface, 'core> {
 
     fn read_error_to_diagnostic(
         &self,
-        err: ReadError<'_>,
-        context: &mut elaboration::Context,
+        err: ReadError<'core>,
+        context: &mut elaboration::Context<'core>,
     ) -> Diagnostic<FileId> {
         match err {
             ReadError::ReadFailFormat(span) => Diagnostic::error()
