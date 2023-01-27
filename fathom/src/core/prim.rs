@@ -4,7 +4,7 @@ use std::sync::Arc;
 use fxhash::FxHashMap;
 use scoped_arena::Scope;
 
-use crate::core::semantics::{ArcValue, Elim, ElimEnv, Head, LazyValue, Value};
+use crate::core::semantics::{ArcValue, Elim, ElimEnv, Head, Value};
 use crate::core::{self, Const, Plicity, Prim, UIntStyle};
 use crate::env::{self, SharedEnv, UniqueEnv};
 use crate::source::{Span, Spanned, StringId, StringInterner};
@@ -793,8 +793,7 @@ pub fn step(prim: Prim) -> Step {
             step!(env, [_, elem_type, pred, array] => match env.force_lazy(array).as_ref() {
                 Value::ArrayLit(elems) => {
                     for elem in elems {
-                        let elem = LazyValue::eager(elem.clone());
-                        match env.fun_app(Plicity::Explicit, env.force_lazy(pred), &elem).as_ref() {
+                        match env.fun_app(Plicity::Explicit, env.force_lazy(pred), elem).as_ref() {
                             Value::ConstLit(Const::Bool(true)) => {
                                 return Some(Spanned::empty(Arc::new(Value::Stuck(
                                     Head::Prim(Prim::OptionSome),
@@ -827,7 +826,7 @@ pub fn step(prim: Prim) -> Step {
                         Value::ConstLit(Const::U64(index, _)) => usize::try_from(*index).ok(),
                         _ => return None,
                     }?;
-                    elems.get(index).cloned()?
+                    env.force_lazy(elems.get(index)?)
                 }
                 _ => return None,
             })

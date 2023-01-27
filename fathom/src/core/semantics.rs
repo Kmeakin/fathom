@@ -30,22 +30,27 @@ pub enum Value<'arena> {
     Universe,
 
     /// Dependent function types.
-    FunType(Plicity, Option<StringId>, ArcValue<'arena>, Closure<'arena>),
+    FunType(
+        Plicity,
+        Option<StringId>,
+        Arc<LazyValue<'arena>>, // wrapped in `Arc` to keep size_of<Value> down
+        Closure<'arena>,
+    ),
     /// Function literals.
     FunLit(Plicity, Option<StringId>, Closure<'arena>),
 
     /// Record types.
     RecordType(&'arena [StringId], Telescope<'arena>),
     /// Record literals.
-    RecordLit(&'arena [StringId], Vec<ArcValue<'arena>>),
+    RecordLit(&'arena [StringId], Vec<LazyValue<'arena>>),
 
     /// Array literals.
-    ArrayLit(Vec<ArcValue<'arena>>),
+    ArrayLit(Vec<LazyValue<'arena>>),
 
     /// Record formats, consisting of a list of dependent formats.
     FormatRecord(&'arena [StringId], Telescope<'arena>),
     /// Conditional format, consisting of a format and predicate.
-    FormatCond(StringId, ArcValue<'arena>, Closure<'arena>),
+    FormatCond(StringId, Arc<LazyValue<'arena>>, Closure<'arena>),
     /// Overlap formats, consisting of a list of dependent formats, overlapping
     /// in memory.
     FormatOverlap(&'arena [StringId], Telescope<'arena>),
@@ -367,7 +372,7 @@ impl<'arena, 'env> EvalEnv<'arena, 'env> {
                 Arc::new(Value::FunType(
                     *plicity,
                     *param_name,
-                    self.eval(param_type),
+                    Arc::new(self.delay(param_type)),
                     Closure::new(self.local_exprs.clone(), body_type),
                 )),
             ),
@@ -390,7 +395,7 @@ impl<'arena, 'env> EvalEnv<'arena, 'env> {
                 Spanned::new(*span, Arc::new(Value::RecordType(labels, types)))
             }
             Term::RecordLit(span, labels, exprs) => {
-                let exprs = exprs.iter().map(|expr| self.eval(expr)).collect();
+                let exprs = exprs.iter().map(|expr| self.delay(expr)).collect();
                 Spanned::new(*span, Arc::new(Value::RecordLit(labels, exprs)))
             }
             Term::RecordProj(span, head_expr, label) => {
@@ -399,7 +404,7 @@ impl<'arena, 'env> EvalEnv<'arena, 'env> {
             }
 
             Term::ArrayLit(span, exprs) => {
-                let exprs = exprs.iter().map(|expr| self.eval(expr)).collect();
+                let exprs = exprs.iter().map(|expr| self.delay(expr)).collect();
                 Spanned::new(*span, Arc::new(Value::ArrayLit(exprs)))
             }
 
@@ -408,7 +413,7 @@ impl<'arena, 'env> EvalEnv<'arena, 'env> {
                 Spanned::new(*span, Arc::new(Value::FormatRecord(labels, formats)))
             }
             Term::FormatCond(span, name, format, cond) => {
-                let format = self.eval(format);
+                let format = Arc::new(self.delay(format));
                 let cond_expr = Closure::new(self.local_exprs.clone(), cond);
                 Spanned::new(*span, Arc::new(Value::FormatCond(*name, format, cond_expr)))
             }
@@ -617,7 +622,7 @@ impl<'arena, 'env> ElimEnv<'arena, 'env> {
     /// [beta-reduction]: https://ncatlab.org/nlab/show/beta-reduction
     pub fn record_proj(
         &self,
-        mut head_expr: ArcValue<'arena>,
+        mut head_expr: ArcValue<'arena>, // TODO: should `head_expr` be lazy?
         label: StringId,
     ) -> ArcValue<'arena> {
         match Arc::make_mut(&mut head_expr) {
@@ -625,6 +630,7 @@ impl<'arena, 'env> ElimEnv<'arena, 'env> {
             Value::RecordLit(labels, exprs) => (labels.iter())
                 .position(|current_label| *current_label == label)
                 .and_then(|expr_index| exprs.get(expr_index).cloned())
+                .map(|lazy_value| self.force_lazy(&lazy_value))
                 .unwrap_or_else(|| panic_any(Error::InvalidRecordProj)),
             // The computation is stuck, preventing further reduction
             Value::Stuck(_, spine) => {
@@ -686,7 +692,7 @@ impl<'arena, 'env> ElimEnv<'arena, 'env> {
             Value::FormatRecord(labels, formats) | Value::FormatOverlap(labels, formats) => {
                 Value::RecordType(labels, formats.clone().apply_repr())
             }
-            Value::FormatCond(_, format, _) => return self.format_repr(format),
+            Value::FormatCond(_, format, _) => return self.format_repr(&self.force_lazy(format)),
             Value::Stuck(Head::Prim(prim), spine) => match prim::repr(*prim)(self, spine) {
                 Some(r#type) => return r#type,
                 None => Value::prim(Prim::FormatRepr, [format.clone()]),
@@ -753,7 +759,7 @@ impl<'in_arena, 'env> QuoteEnv<'in_arena, 'env> {
                         span,
                         *plicity,
                         scope.to_scope(head_expr),
-                        scope.to_scope(self.quote(scope, &self.elim_env.force_lazy(arg_expr))),
+                        scope.to_scope(self.quote_lazy(scope, arg_expr)),
                     ),
                     Elim::RecordProj(label) => {
                         Term::RecordProj(span, scope.to_scope(head_expr), *label)
@@ -792,7 +798,7 @@ impl<'in_arena, 'env> QuoteEnv<'in_arena, 'env> {
                 span,
                 *plicity,
                 *param_name,
-                scope.to_scope(self.quote(scope, param_type)),
+                scope.to_scope(self.quote_lazy(scope, param_type)),
                 self.quote_closure(scope, body_type),
             ),
             Value::FunLit(plicity, param_name, body_expr) => Term::FunLit(
@@ -810,11 +816,11 @@ impl<'in_arena, 'env> QuoteEnv<'in_arena, 'env> {
             Value::RecordLit(labels, exprs) => Term::RecordLit(
                 span,
                 scope.to_scope_from_iter(labels.iter().copied()),
-                scope.to_scope_from_iter(exprs.iter().map(|expr| self.quote(scope, expr))),
+                scope.to_scope_from_iter((exprs.iter()).map(|expr| self.quote_lazy(scope, expr))),
             ),
             Value::ArrayLit(exprs) => Term::ArrayLit(
                 span,
-                scope.to_scope_from_iter(exprs.iter().map(|expr| self.quote(scope, expr))),
+                scope.to_scope_from_iter(exprs.iter().map(|expr| self.quote_lazy(scope, expr))),
             ),
 
             Value::FormatRecord(labels, formats) => Term::FormatRecord(
@@ -825,7 +831,7 @@ impl<'in_arena, 'env> QuoteEnv<'in_arena, 'env> {
             Value::FormatCond(label, format, cond) => Term::FormatCond(
                 span,
                 *label,
-                scope.to_scope(self.quote(scope, format)),
+                scope.to_scope(self.quote_lazy(scope, format)),
                 self.quote_closure(scope, cond),
             ),
             Value::FormatOverlap(labels, formats) => Term::FormatOverlap(
@@ -836,6 +842,14 @@ impl<'in_arena, 'env> QuoteEnv<'in_arena, 'env> {
 
             Value::ConstLit(r#const) => Term::ConstLit(span, *r#const),
         }
+    }
+
+    pub fn quote_lazy<'out_arena>(
+        &mut self,
+        scope: &'out_arena Scope<'out_arena>,
+        value: &LazyValue<'in_arena>,
+    ) -> Term<'out_arena> {
+        self.quote(scope, &self.elim_env.force_lazy(value))
     }
 
     /// Quote an [elimination head][Head] back into a [term][Term].
@@ -1188,7 +1202,7 @@ impl<'arena, 'env> ConversionEnv<'arena, 'env> {
                 Value::FunType(plicity1, _, param_type1, body_type1),
             ) => {
                 plicity0 == plicity1
-                    && self.is_equal(param_type0, param_type1)
+                    && self.is_equal_lazy(param_type0, param_type1)
                     && self.is_equal_closures(body_type0, body_type1)
             }
             (Value::FunLit(plicity0, _, body_expr0), Value::FunLit(plicity1, _, body_expr1)) => {
@@ -1207,7 +1221,7 @@ impl<'arena, 'env> ConversionEnv<'arena, 'env> {
             (Value::RecordLit(labels0, exprs0), Value::RecordLit(labels1, exprs1)) => {
                 labels0 == labels1
                     && Iterator::zip(exprs0.iter(), exprs1.iter())
-                        .all(|(expr0, expr1)| self.is_equal(expr0, expr1))
+                        .all(|(expr0, expr1)| self.is_equal_lazy(expr0, expr1))
             }
             (Value::RecordLit(labels, exprs), _) => {
                 self.is_equal_record_lit(labels, exprs, &value1)
@@ -1218,7 +1232,7 @@ impl<'arena, 'env> ConversionEnv<'arena, 'env> {
 
             (Value::ArrayLit(exprs0), Value::ArrayLit(exprs1)) => {
                 Iterator::zip(exprs0.iter(), exprs1.iter())
-                    .all(|(expr0, expr1)| self.is_equal(expr0, expr1))
+                    .all(|(expr0, expr1)| self.is_equal_lazy(expr0, expr1))
             }
 
             (Value::FormatRecord(labels0, formats0), Value::FormatRecord(labels1, formats1))
@@ -1231,7 +1245,7 @@ impl<'arena, 'env> ConversionEnv<'arena, 'env> {
                 Value::FormatCond(label1, format1, cond1),
             ) => {
                 label0 == label1
-                    && self.is_equal(format0, format1)
+                    && self.is_equal_lazy(format0, format1)
                     && self.is_equal_closures(cond0, cond1)
             }
 
@@ -1241,17 +1255,24 @@ impl<'arena, 'env> ConversionEnv<'arena, 'env> {
         }
     }
 
+    pub fn is_equal_lazy(
+        &mut self,
+        value0: &LazyValue<'arena>,
+        value1: &LazyValue<'arena>,
+    ) -> bool {
+        self.is_equal(
+            &self.elim_env.force_lazy(value0),
+            &self.elim_env.force_lazy(value1),
+        )
+    }
+
     /// Check that two elimination spines are equal.
     pub fn is_equal_spines(&mut self, spine0: &[Elim<'arena>], spine1: &[Elim<'arena>]) -> bool {
         spine0.len() == spine1.len()
             && Iterator::zip(spine0.iter(), spine1.iter()).all(|(elim0, elim1)| {
                 match (elim0, elim1) {
                     (Elim::FunApp(plicity0, expr0), Elim::FunApp(plicity1, expr1)) => {
-                        plicity0 == plicity1
-                            && self.is_equal(
-                                &self.elim_env.force_lazy(expr0),
-                                &self.elim_env.force_lazy(expr1),
-                            )
+                        plicity0 == plicity1 && self.is_equal_lazy(expr0, expr1)
                     }
                     (Elim::RecordProj(label0), Elim::RecordProj(label1)) => label0 == label1,
                     (Elim::ConstMatch(branches0), Elim::ConstMatch(branches1)) => {
@@ -1375,12 +1396,12 @@ impl<'arena, 'env> ConversionEnv<'arena, 'env> {
     fn is_equal_record_lit(
         &mut self,
         labels: &[StringId],
-        exprs: &[ArcValue<'arena>],
+        exprs: &[LazyValue<'arena>],
         value: &ArcValue<'arena>,
     ) -> bool {
         Iterator::zip(labels.iter(), exprs.iter()).all(|(label, expr)| {
             let field_value = self.elim_env.record_proj(value.clone(), *label);
-            self.is_equal(expr, &field_value)
+            self.is_equal(&self.elim_env.force_lazy(expr), &field_value)
         })
     }
 }
