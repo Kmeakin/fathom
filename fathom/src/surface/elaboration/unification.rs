@@ -236,7 +236,7 @@ impl<'arena, 'env> Context<'arena, 'env> {
                 Value::FunType(plicity0, _, param_type0, body_type0),
                 Value::FunType(plicity1, _, param_type1, body_type1),
             ) if plicity0 == plicity1 => {
-                self.unify(param_type0, param_type1)?;
+                self.unify_lazy(param_type0, param_type1)?;
                 self.unify_closures(body_type0, body_type1)
             }
             (Value::FunLit(plicity0, _, body_expr0), Value::FunLit(plicity1, _, body_expr1))
@@ -262,7 +262,7 @@ impl<'arena, 'env> Context<'arena, 'env> {
                     return Err(Error::Mismatch);
                 }
                 for (expr0, expr1) in Iterator::zip(exprs0.iter(), exprs1.iter()) {
-                    self.unify(expr0, expr1)?;
+                    self.unify_lazy(expr0, expr1)?;
                 }
                 Ok(())
             }
@@ -273,7 +273,7 @@ impl<'arena, 'env> Context<'arena, 'env> {
                 for (elem_expr0, elem_expr1) in
                     Iterator::zip(elem_exprs0.iter(), elem_exprs1.iter())
                 {
-                    self.unify(elem_expr0, elem_expr1)?;
+                    self.unify_lazy(elem_expr0, elem_expr1)?;
                 }
                 Ok(())
             }
@@ -292,7 +292,7 @@ impl<'arena, 'env> Context<'arena, 'env> {
                 if label0 != label1 {
                     return Err(Error::Mismatch);
                 }
-                self.unify(format0, format1)?;
+                self.unify_lazy(format0, format1)?;
                 self.unify_closures(cond0, cond1)
             }
 
@@ -309,6 +309,17 @@ impl<'arena, 'env> Context<'arena, 'env> {
         }
     }
 
+    pub fn unify_lazy(
+        &mut self,
+        value0: &LazyValue<'arena>,
+        value1: &LazyValue<'arena>,
+    ) -> Result<(), Error> {
+        self.unify(
+            &self.elim_env().force_lazy(value0),
+            &self.elim_env().force_lazy(value1),
+        )
+    }
+
     /// Unify two elimination spines.
     fn unify_spines(
         &mut self,
@@ -323,10 +334,7 @@ impl<'arena, 'env> Context<'arena, 'env> {
                 (Elim::FunApp(plicity0, arg_expr0), Elim::FunApp(plicity1, arg_expr1))
                     if plicity0 == plicity1 =>
                 {
-                    self.unify(
-                        &self.elim_env().force_lazy(arg_expr0),
-                        &self.elim_env().force_lazy(arg_expr1),
-                    )?;
+                    self.unify_lazy(arg_expr0, arg_expr1)?;
                 }
                 (Elim::RecordProj(label0), Elim::RecordProj(label1)) if label0 == label1 => {}
                 (Elim::ConstMatch(branches0), Elim::ConstMatch(branches1)) => {
@@ -456,12 +464,12 @@ impl<'arena, 'env> Context<'arena, 'env> {
     fn unify_record_lit(
         &mut self,
         labels: &[Symbol],
-        exprs: &[ArcValue<'arena>],
+        exprs: &[LazyValue<'arena>],
         value: &ArcValue<'arena>,
     ) -> Result<(), Error> {
         for (label, expr) in Iterator::zip(labels.iter(), exprs.iter()) {
             let field_value = self.elim_env().record_proj(value.clone(), *label);
-            self.unify(expr, &field_value)?;
+            self.unify(&self.elim_env().force_lazy(expr), &field_value)?;
         }
         Ok(())
     }
@@ -570,9 +578,7 @@ impl<'arena, 'env> Context<'arena, 'env> {
                             span,
                             *plicity,
                             self.scope.to_scope(head_expr),
-                            self.scope.to_scope(
-                                self.rename(meta_var, &self.elim_env().force_lazy(arg_expr))?,
-                            ),
+                            self.scope.to_scope(self.rename_lazy(meta_var, arg_expr)?),
                         ),
                         Elim::RecordProj(label) => {
                             Term::RecordProj(span, self.scope.to_scope(head_expr), *label)
@@ -614,7 +620,7 @@ impl<'arena, 'env> Context<'arena, 'env> {
             Value::Universe => Ok(Term::Universe(span)),
 
             Value::FunType(plicity, param_name, param_type, body_type) => {
-                let param_type = self.rename(meta_var, param_type)?;
+                let param_type = self.rename_lazy(meta_var, param_type)?;
                 let body_type = self.rename_closure(meta_var, body_type)?;
 
                 Ok(Term::FunType(
@@ -644,7 +650,7 @@ impl<'arena, 'env> Context<'arena, 'env> {
             Value::RecordLit(labels, exprs) => {
                 let mut new_exprs = SliceVec::new(self.scope, exprs.len());
                 for expr in exprs {
-                    new_exprs.push(self.rename(meta_var, expr)?);
+                    new_exprs.push(self.rename_lazy(meta_var, expr)?);
                 }
 
                 Ok(Term::RecordLit(span, labels, new_exprs.into()))
@@ -653,7 +659,7 @@ impl<'arena, 'env> Context<'arena, 'env> {
             Value::ArrayLit(elem_exprs) => {
                 let mut new_elem_exprs = SliceVec::new(self.scope, elem_exprs.len());
                 for elem_expr in elem_exprs {
-                    new_elem_exprs.push(self.rename(meta_var, elem_expr)?);
+                    new_elem_exprs.push(self.rename_lazy(meta_var, elem_expr)?);
                 }
 
                 Ok(Term::ArrayLit(span, new_elem_exprs.into()))
@@ -665,7 +671,7 @@ impl<'arena, 'env> Context<'arena, 'env> {
                 Ok(Term::FormatRecord(span, labels, formats))
             }
             Value::FormatCond(label, format, cond) => {
-                let format = self.rename(meta_var, format)?;
+                let format = self.rename_lazy(meta_var, format)?;
                 let cond = self.rename_closure(meta_var, cond)?;
                 Ok(Term::FormatCond(
                     span,
@@ -682,6 +688,14 @@ impl<'arena, 'env> Context<'arena, 'env> {
 
             Value::ConstLit(constant) => Ok(Term::ConstLit(span, *constant)),
         }
+    }
+
+    fn rename_lazy(
+        &mut self,
+        meta_var: Level,
+        value: &LazyValue<'arena>,
+    ) -> Result<Term<'arena>, RenameError> {
+        self.rename(meta_var, &self.elim_env().force_lazy(value))
     }
 
     /// Rename a closure back into a [`Term`].

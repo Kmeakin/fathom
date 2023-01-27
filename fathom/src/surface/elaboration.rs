@@ -1282,7 +1282,7 @@ impl<'arena> Context<'arena> {
             self.elim_env().force_metas(&r#type).as_ref()
         {
             let source = MetaSource::ImplicitArg(file_range, *name);
-            let arg_term = self.push_unsolved_term(source, param_type.clone());
+            let arg_term = self.push_unsolved_term(source, self.elim_env().force_lazy(param_type));
             let arg_value = self.eval_env().eval(&arg_term);
 
             term = core::Term::FunApp(
@@ -1528,7 +1528,7 @@ impl<'arena> Context<'arena> {
                     let arg_range = arg.term.range();
                     head_range = ByteRange::merge(head_range, arg_range);
 
-                    let arg_expr = self.check(&arg.term, param_type);
+                    let arg_expr = self.check(&arg.term, &self.elim_env().force_lazy(param_type));
                     let arg_expr_value = self.eval_env().eval(&arg_expr);
 
                     head_expr = core::Term::FunApp(
@@ -1736,10 +1736,11 @@ impl<'arena> Context<'arena> {
                         if param.plicity == *param_plicity =>
                     {
                         let range = ByteRange::merge(param.pattern.range(), body_expr.range());
+                        let param_type = self.elim_env().force_lazy(param_type);
                         let pattern = self.check_ann_pattern(
                             &param.pattern,
                             param.r#type.as_ref(),
-                            param_type,
+                            &param_type,
                         );
                         let (name, arg_expr) = self.push_local_param(pattern, param_type.clone());
 
@@ -1760,7 +1761,9 @@ impl<'arena> Context<'arena> {
                     Value::FunType(Plicity::Implicit, param_name, param_type, next_body_type)
                         if param.plicity == Plicity::Explicit =>
                     {
-                        let arg_expr = self.local_env.push_param(*param_name, param_type.clone());
+                        let arg_expr = self
+                            .local_env
+                            .push_param(*param_name, self.elim_env().force_lazy(param_type));
                         let body_type = self.elim_env().apply_closure(next_body_type, arg_expr);
                         let body_expr = self.check_fun_lit(range, params, body_expr, &body_type);
                         self.local_env.pop();

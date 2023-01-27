@@ -7,7 +7,7 @@ use std::fmt::Debug;
 use std::slice::SliceIndex;
 use std::sync::Arc;
 
-use crate::core::semantics::{self, ArcValue, Elim, Head, Value};
+use crate::core::semantics::{self, ArcValue, Elim, Head, LazyValue, Value};
 use crate::core::{Const, Item, Module, Prim, Term, UIntStyle};
 use crate::env::{EnvLen, SharedEnv, UniqueEnv};
 use crate::source::{Span, Spanned};
@@ -333,7 +333,7 @@ impl<'arena, 'data> Context<'arena, 'data> {
 
                 while let Some((format, next_formats)) = self.elim_env().split_telescope(formats) {
                     let expr = self.read_format(reader, &format)?;
-                    exprs.push(expr.clone());
+                    exprs.push(LazyValue::eager(expr.clone()));
                     formats = next_formats(expr);
                 }
 
@@ -343,7 +343,7 @@ impl<'arena, 'data> Context<'arena, 'data> {
                 ))
             }
             Value::FormatCond(_label, format, cond) => {
-                let value = self.read_format(reader, format)?;
+                let value = self.read_format(reader, &self.elim_env().force_lazy(format))?;
                 let cond_res = self.elim_env().apply_closure(cond, value.clone());
 
                 match cond_res.as_ref() {
@@ -367,7 +367,7 @@ impl<'arena, 'data> Context<'arena, 'data> {
                     let mut reader = reader.clone();
 
                     let expr = self.read_format(&mut reader, &format)?;
-                    exprs.push(expr.clone());
+                    exprs.push(LazyValue::eager(expr.clone()));
                     formats = next_formats(expr);
 
                     max_relative_offset =
@@ -462,7 +462,7 @@ impl<'arena, 'data> Context<'arena, 'data> {
         };
 
         let elem_exprs = (0..len)
-            .map(|_| self.read_format(reader, elem_format))
+            .map(|_| (self.read_format(reader, elem_format).map(LazyValue::eager)))
             .collect::<Result<_, _>>()?;
 
         Ok(Spanned::new(span, Arc::new(Value::ArrayLit(elem_exprs))))
@@ -479,7 +479,7 @@ impl<'arena, 'data> Context<'arena, 'data> {
         loop {
             match self.read_format(reader, elem_format) {
                 Ok(elem) => {
-                    elems.push(elem);
+                    elems.push(LazyValue::eager(elem));
                     current_offset = reader.relative_offset();
                 }
                 Err(ReadError::BufferError(_, BufferError::UnexpectedEndOfBuffer)) => {
