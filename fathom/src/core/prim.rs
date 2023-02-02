@@ -644,9 +644,43 @@ pub fn step(prim: Prim) -> Step {
         Prim::BoolEq => const_step!([x: Bool, y: Bool] => Const::Bool(x == y)),
         Prim::BoolNeq => const_step!([x: Bool, y: Bool] => Const::Bool(x != y)),
         Prim::BoolNot => const_step!([x: Bool] => Const::Bool(bool::not(*x))),
-        Prim::BoolAnd => const_step!([x: Bool, y: Bool] => Const::Bool(*x && *y)),
-        Prim::BoolOr => const_step!([x: Bool, y: Bool] => Const::Bool(*x || *y)),
         Prim::BoolXor => const_step!([x: Bool, y: Bool] => Const::Bool(*x ^ *y)),
+
+        Prim::BoolAnd => |env: &ElimEnv, spine: &[Elim]| match spine {
+            [Elim::FunApp(_,x), Elim::FunApp(_, y)] => {
+                let x = env.force_lazy(x);
+                match x.as_ref() {
+                    Value::ConstLit(Const::Bool(false)) => Some(x),
+                    Value::ConstLit(Const::Bool(true)) => {
+                        let y = env.force_lazy(y);
+                        match y.as_ref() {
+                            Value::ConstLit(Const::Bool(_)) => Some(y),
+                            _ => None,
+                        }
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        },
+
+        Prim::BoolOr => |env: &ElimEnv, spine: &[Elim]| match spine {
+            [Elim::FunApp(_,x), Elim::FunApp(_, y)] => {
+                let x = env.force_lazy(x);
+                match x.as_ref() {
+                    Value::ConstLit(Const::Bool(true)) => Some(x),
+                    Value::ConstLit(Const::Bool(false)) => {
+                        let y = env.force_lazy(y);
+                        match y.as_ref() {
+                            Value::ConstLit(Const::Bool(_)) => Some(y),
+                            _ => None,
+                        }
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        },
 
         Prim::U8Eq => const_step!([x: U8, y: U8] => Const::Bool(x == y)),
         Prim::U8Neq => const_step!([x: U8, y: U8] => Const::Bool(x != y)),
