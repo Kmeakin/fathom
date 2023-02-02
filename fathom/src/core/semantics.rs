@@ -18,6 +18,9 @@ use crate::symbol::Symbol;
 /// the amount of sharing we can achieve during evaluation.
 pub type ArcValue<'arena> = Spanned<Arc<Value<'arena>>>;
 
+pub type LocalExprs<'arena> = SharedEnv<LazyValue<'arena>>;
+pub type ItemExprs<'arena> = SliceEnv<LazyValue<'arena>>;
+
 /// Values in weak-head-normal form, with bindings converted to closures.
 #[derive(Debug, Clone)]
 pub enum Value<'arena> {
@@ -68,7 +71,7 @@ pub enum Value<'arena> {
 /// [defunctionalized]: https://en.wikipedia.org/wiki/Defunctionalization
 #[derive(Clone, Debug)]
 enum LazyInit<'arena> {
-    EvalTerm(SharedEnv<ArcValue<'arena>>, &'arena Term<'arena>),
+    EvalTerm(LocalExprs<'arena>, &'arena Term<'arena>),
     ApplyElim(Arc<LazyValue<'arena>>, Arc<Elim<'arena>>),
 }
 
@@ -91,7 +94,7 @@ impl<'arena> LazyValue<'arena> {
 
     /// Create a delayed LazyValue which, when forced, will evaluate `term` in
     /// `local_exprs`
-    pub fn delay(local_exprs: SharedEnv<ArcValue<'arena>>, term: &'arena Term<'arena>) -> Self {
+    pub fn delay(local_exprs: LocalExprs<'arena>, term: &'arena Term<'arena>) -> Self {
         LazyValue {
             init: RefCell::new(Some(LazyInit::EvalTerm(local_exprs, term))),
             cell: OnceCell::new(),
@@ -165,17 +168,14 @@ pub struct Closure<'arena> {
     /// Local environment where the closed [term][Self.term] is bound. A new
     /// entry will need to be pushed to this environment before evaluating the
     /// term.
-    local_exprs: SharedEnv<ArcValue<'arena>>,
+    local_exprs: LocalExprs<'arena>,
     /// The term that is closed over.
     term: &'arena Term<'arena>,
 }
 
 impl<'arena> Closure<'arena> {
     /// Construct a closure.
-    pub fn new(
-        local_exprs: SharedEnv<ArcValue<'arena>>,
-        term: &'arena Term<'arena>,
-    ) -> Closure<'arena> {
+    pub fn new(local_exprs: LocalExprs<'arena>, term: &'arena Term<'arena>) -> Closure<'arena> {
         Closure { local_exprs, term }
     }
 
@@ -194,7 +194,7 @@ impl<'arena> Closure<'arena> {
 #[derive(Debug, Clone)]
 pub struct Telescope<'arena> {
     /// Local environment where the telescope's [terms][Self.terms] are bound.
-    local_exprs: SharedEnv<ArcValue<'arena>>,
+    local_exprs: LocalExprs<'arena>,
     /// `Repr` should be applied to each term in the telescope.
     apply_repr: bool,
     /// The terms in the telescope.
@@ -204,7 +204,7 @@ pub struct Telescope<'arena> {
 impl<'arena> Telescope<'arena> {
     /// Construct a telescope.
     pub fn new(
-        local_exprs: SharedEnv<ArcValue<'arena>>,
+        local_exprs: LocalExprs<'arena>,
         terms: &'arena [Term<'arena>],
     ) -> Telescope<'arena> {
         Telescope {
@@ -231,7 +231,7 @@ impl<'arena> Telescope<'arena> {
 /// The branches of a single-level pattern match.
 #[derive(Debug, Clone)]
 pub struct Branches<'arena, P> {
-    local_exprs: SharedEnv<ArcValue<'arena>>,
+    local_exprs: LocalExprs<'arena>,
     pattern_branches: &'arena [(P, Term<'arena>)],
     default_branch: Option<(Option<Symbol>, &'arena Term<'arena>)>,
 }
@@ -239,7 +239,7 @@ pub struct Branches<'arena, P> {
 impl<'arena, P> Branches<'arena, P> {
     /// Construct a single-level pattern match.
     pub fn new(
-        local_exprs: SharedEnv<ArcValue<'arena>>,
+        local_exprs: LocalExprs<'arena>,
         pattern_branches: &'arena [(P, Term<'arena>)],
         default_branch: Option<(Option<Symbol>, &'arena Term<'arena>)>,
     ) -> Branches<'arena, P> {
@@ -300,13 +300,13 @@ impl Error {
 /// also maintains a local environment, allowing for evaluation.
 pub struct EvalEnv<'arena, 'env> {
     elim_env: ElimEnv<'arena, 'env>,
-    local_exprs: &'env mut SharedEnv<ArcValue<'arena>>,
+    local_exprs: &'env mut LocalExprs<'arena>,
 }
 
 impl<'arena, 'env> EvalEnv<'arena, 'env> {
     pub fn new(
         elim_env: ElimEnv<'arena, 'env>,
-        local_exprs: &'env mut SharedEnv<ArcValue<'arena>>,
+        local_exprs: &'env mut LocalExprs<'arena>,
     ) -> EvalEnv<'arena, 'env> {
         EvalEnv {
             elim_env,
@@ -314,7 +314,7 @@ impl<'arena, 'env> EvalEnv<'arena, 'env> {
         }
     }
 
-    fn delay(&self, term: &'arena Term<'arena>) -> LazyValue<'arena> {
+    pub fn delay(&self, term: &'arena Term<'arena>) -> LazyValue<'arena> {
         LazyValue::delay(self.local_exprs.clone(), term)
     }
 
@@ -322,7 +322,7 @@ impl<'arena, 'env> EvalEnv<'arena, 'env> {
         QuoteEnv::new(self.elim_env, self.local_exprs.len())
     }
 
-    fn get_local_expr<'this: 'env>(&'this self, var: Index) -> &'env ArcValue<'arena> {
+    fn get_local_expr<'this: 'env>(&'this self, var: Index) -> &'env LazyValue<'arena> {
         let value = self.local_exprs.get_index(var);
         value.unwrap_or_else(|| panic_any(Error::UnboundLocalVar))
     }
@@ -345,21 +345,25 @@ impl<'arena, 'env> EvalEnv<'arena, 'env> {
     /// twitter thread](https://twitter.com/brendanzab/status/1423536653658771457)).
     pub fn eval(&mut self, term: &Term<'arena>) -> ArcValue<'arena> {
         match term {
-            Term::ItemVar(span, var) => {
-                Spanned::new(*span, Arc::clone(self.elim_env.get_item_expr(*var)))
+            Term::ItemVar(_, var) => {
+                let expr = self.elim_env.get_item_expr(*var);
+                self.elim_env.force_lazy(expr)
             }
             Term::MetaVar(span, var) => match self.elim_env.get_meta_expr(*var) {
                 Some(value) => Spanned::new(*span, Arc::clone(value)),
                 None => Spanned::new(*span, Arc::new(Value::meta_var(*var))),
             },
-            Term::LocalVar(span, var) => Spanned::new(*span, Arc::clone(self.get_local_expr(*var))),
+            Term::LocalVar(_, var) => {
+                let expr = self.get_local_expr(*var);
+                self.elim_env.force_lazy(expr)
+            }
             Term::InsertedMeta(span, var, local_infos) => {
                 let head_expr = self.eval(&Term::MetaVar(*span, *var));
                 self.apply_local_infos(head_expr, local_infos)
             }
             Term::Ann(span, expr, _) => Spanned::merge(*span, self.eval(expr)),
             Term::Let(span, _, _, def_expr, body_expr) => {
-                let def_expr = self.eval(def_expr);
+                let def_expr = self.delay(def_expr);
                 self.local_exprs.push(def_expr);
                 let body_expr = self.eval(body_expr);
                 self.local_exprs.pop();
@@ -444,11 +448,7 @@ impl<'arena, 'env> EvalEnv<'arena, 'env> {
         for (info, expr) in Iterator::zip(infos.iter(), self.local_exprs.iter()) {
             head_expr = match info {
                 LocalInfo::Def => head_expr,
-                LocalInfo::Param => self.elim_env.fun_app(
-                    Plicity::Explicit,
-                    head_expr,
-                    &LazyValue::eager(expr.clone()),
-                ),
+                LocalInfo::Param => self.elim_env.fun_app(Plicity::Explicit, head_expr, expr),
             };
         }
         head_expr
@@ -461,13 +461,13 @@ impl<'arena, 'env> EvalEnv<'arena, 'env> {
 /// environment that would be needed for full evaluation.
 #[derive(Copy, Clone)]
 pub struct ElimEnv<'arena, 'env> {
-    item_exprs: &'env SliceEnv<ArcValue<'arena>>,
+    item_exprs: &'env ItemExprs<'arena>,
     meta_exprs: &'env SliceEnv<Option<ArcValue<'arena>>>,
 }
 
 impl<'arena, 'env> ElimEnv<'arena, 'env> {
     pub fn new(
-        item_exprs: &'env SliceEnv<ArcValue<'arena>>,
+        item_exprs: &'env ItemExprs<'arena>,
         meta_exprs: &'env SliceEnv<Option<ArcValue<'arena>>>,
     ) -> ElimEnv<'arena, 'env> {
         ElimEnv {
@@ -476,10 +476,7 @@ impl<'arena, 'env> ElimEnv<'arena, 'env> {
         }
     }
 
-    pub fn eval_env(
-        &self,
-        local_exprs: &'env mut SharedEnv<ArcValue<'arena>>,
-    ) -> EvalEnv<'arena, 'env> {
+    pub fn eval_env(&self, local_exprs: &'env mut LocalExprs<'arena>) -> EvalEnv<'arena, 'env> {
         EvalEnv::new(*self, local_exprs)
     }
 
@@ -487,7 +484,7 @@ impl<'arena, 'env> ElimEnv<'arena, 'env> {
         ConversionEnv::new(*self, local_exprs)
     }
 
-    fn get_item_expr(&self, var: Level) -> &'env ArcValue<'arena> {
+    fn get_item_expr(&self, var: Level) -> &'env LazyValue<'arena> {
         let value = self.item_exprs.get_level(var);
         value.unwrap_or_else(|| panic_any(Error::UnboundItemVar))
     }
@@ -538,7 +535,7 @@ impl<'arena, 'env> ElimEnv<'arena, 'env> {
     pub fn apply_closure(
         &self,
         closure: &Closure<'arena>,
-        value: ArcValue<'arena>,
+        value: LazyValue<'arena>,
     ) -> ArcValue<'arena> {
         let mut local_exprs = closure.local_exprs.clone();
         local_exprs.push(value);
@@ -552,7 +549,7 @@ impl<'arena, 'env> ElimEnv<'arena, 'env> {
         mut telescope: Telescope<'arena>,
     ) -> Option<(
         ArcValue<'arena>,
-        impl FnOnce(ArcValue<'arena>) -> Telescope<'arena>,
+        impl FnOnce(LazyValue<'arena>) -> Telescope<'arena>,
     )> {
         let (term, terms) = telescope.terms.split_first()?;
         let mut env = self.eval_env(&mut telescope.local_exprs);
@@ -603,7 +600,7 @@ impl<'arena, 'env> ElimEnv<'arena, 'env> {
             Value::FunLit(fun_plicity, _, body_expr) => {
                 assert_eq!(arg_plicity, *fun_plicity, "Plicities must be equal");
                 // FIXME: use span from head/arg exprs?
-                self.apply_closure(body_expr, self.force_lazy(arg_expr))
+                self.apply_closure(body_expr, arg_expr.clone())
             }
             // The computation is stuck, preventing further reduction
             Value::Stuck(head, spine) => {
@@ -663,7 +660,7 @@ impl<'arena, 'env> ElimEnv<'arena, 'env> {
                 let mut local_exprs = branches.local_exprs.clone();
                 match branches.default_branch {
                     Some((_, default_expr)) => {
-                        local_exprs.push(head_expr);
+                        local_exprs.push(LazyValue::eager(head_expr));
                         self.eval_env(&mut local_exprs).eval(default_expr)
                     }
                     None => panic_any(Error::MissingConstDefault),
@@ -884,8 +881,10 @@ impl<'in_arena, 'env> QuoteEnv<'in_arena, 'env> {
         scope: &'out_arena Scope<'out_arena>,
         closure: &Closure<'in_arena>,
     ) -> &'out_arena Term<'out_arena> {
-        let var = Arc::new(Value::local_var(self.local_exprs.next_level()));
-        let value = self.elim_env.apply_closure(closure, Spanned::empty(var));
+        let var = LazyValue::eager(Spanned::empty(Arc::new(Value::local_var(
+            self.local_exprs.next_level(),
+        ))));
+        let value = self.elim_env.apply_closure(closure, var);
 
         self.push_local();
         let term = self.quote(scope, &value);
@@ -905,8 +904,10 @@ impl<'in_arena, 'env> QuoteEnv<'in_arena, 'env> {
         let mut terms = SliceVec::new(scope, telescope.len());
 
         while let Some((value, next_telescope)) = self.elim_env.split_telescope(telescope) {
-            let var = Arc::new(Value::local_var(self.local_exprs.next_level()));
-            telescope = next_telescope(Spanned::empty(var));
+            let var = LazyValue::eager(Spanned::empty(Arc::new(Value::local_var(
+                self.local_exprs.next_level(),
+            ))));
+            telescope = next_telescope(var);
             terms.push(self.quote(scope, &value));
             self.local_exprs.push();
         }
@@ -1071,7 +1072,7 @@ impl<'arena, 'env> EvalEnv<'arena, 'env> {
                     TermOrValue::Value(head_expr) => TermOrValue::Value(self.elim_env.fun_app(
                         *plicity,
                         head_expr,
-                        &self.delay(arg_expr),
+                        &LazyValue::delay(self.local_exprs.clone(), arg_expr),
                     )),
                 }
             }
@@ -1116,9 +1117,11 @@ impl<'arena, 'env> EvalEnv<'arena, 'env> {
         scope: &'out_arena Scope<'out_arena>,
         term: &Term<'arena>,
     ) -> &'out_arena Term<'out_arena> {
-        let var = Arc::new(Value::local_var(self.local_exprs.len().next_level()));
+        let var = LazyValue::eager(Spanned::empty(Arc::new(Value::local_var(
+            self.local_exprs.len().next_level(),
+        ))));
 
-        self.local_exprs.push(Spanned::empty(var));
+        self.local_exprs.push(var);
         let term = self.unfold_metas(scope, term);
         self.local_exprs.pop();
 
@@ -1135,8 +1138,10 @@ impl<'arena, 'env> EvalEnv<'arena, 'env> {
 
         let terms = scope.to_scope_from_iter(terms.iter().map(|term| {
             let term = self.unfold_metas(scope, term);
-            let var = Arc::new(Value::local_var(self.local_exprs.len().next_level()));
-            self.local_exprs.push(Spanned::empty(var));
+            let var = LazyValue::eager(Spanned::empty(Arc::new(Value::local_var(
+                self.local_exprs.len().next_level(),
+            ))));
+            self.local_exprs.push(var);
             term
         }));
 
@@ -1290,7 +1295,9 @@ impl<'arena, 'env> ConversionEnv<'arena, 'env> {
         closure0: &Closure<'arena>,
         closure1: &Closure<'arena>,
     ) -> bool {
-        let var = Spanned::empty(Arc::new(Value::local_var(self.local_exprs.next_level())));
+        let var = LazyValue::eager(Spanned::empty(Arc::new(Value::local_var(
+            self.local_exprs.next_level(),
+        ))));
         let value0 = self.elim_env.apply_closure(closure0, var.clone());
         let value1 = self.elim_env.apply_closure(closure1, var);
 
@@ -1324,7 +1331,9 @@ impl<'arena, 'env> ConversionEnv<'arena, 'env> {
                 return false;
             }
 
-            let var = Spanned::empty(Arc::new(Value::local_var(self.local_exprs.next_level())));
+            let var = LazyValue::eager(Spanned::empty(Arc::new(Value::local_var(
+                self.local_exprs.next_level(),
+            ))));
             telescope0 = next_telescope0(var.clone());
             telescope1 = next_telescope1(var);
             self.local_exprs.push();
@@ -1377,9 +1386,10 @@ impl<'arena, 'env> ConversionEnv<'arena, 'env> {
         body_expr: &Closure<'arena>,
         value: &ArcValue<'arena>,
     ) -> bool {
-        let var = Spanned::empty(Arc::new(Value::local_var(self.local_exprs.next_level())));
-        let arg = LazyValue::eager(var.clone());
-        let value = self.elim_env.fun_app(plicity, value.clone(), &arg);
+        let var = LazyValue::eager(Spanned::empty(Arc::new(Value::local_var(
+            self.local_exprs.next_level(),
+        ))));
+        let value = self.elim_env.fun_app(plicity, value.clone(), &var);
         let body_expr = self.elim_env.apply_closure(body_expr, var);
 
         self.push_local();
