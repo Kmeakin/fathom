@@ -7,6 +7,7 @@ use std::fmt::Debug;
 use std::slice::SliceIndex;
 use std::sync::Arc;
 
+use super::semantics::LocalExprs;
 use crate::core::semantics::{self, ArcValue, Elim, Head, LazyValue, Value};
 use crate::core::{Const, Item, Module, Prim, Term, UIntStyle};
 use crate::env::{EnvLen, SharedEnv, UniqueEnv};
@@ -254,8 +255,8 @@ impl fmt::Display for BufferError {
 impl std::error::Error for BufferError {}
 
 pub struct Context<'arena, 'data> {
-    item_exprs: UniqueEnv<ArcValue<'arena>>,
-    local_exprs: SharedEnv<ArcValue<'arena>>,
+    item_exprs: UniqueEnv<LazyValue<'arena>>,
+    local_exprs: LocalExprs<'arena>,
     initial_buffer: Buffer<'data>,
     pending_formats: Vec<(usize, ArcValue<'arena>)>,
     cached_refs: HashMap<usize, Vec<ParsedRef<'arena>>>,
@@ -295,7 +296,7 @@ impl<'arena, 'data> Context<'arena, 'data> {
         for item in module.items {
             match item {
                 Item::Def { expr, .. } => {
-                    let expr = self.eval_env().eval(expr);
+                    let expr = self.eval_env().delay(expr);
                     self.item_exprs.push(expr);
                 }
             }
@@ -332,8 +333,8 @@ impl<'arena, 'data> Context<'arena, 'data> {
                 let mut exprs = Vec::with_capacity(formats.len());
 
                 while let Some((format, next_formats)) = self.elim_env().split_telescope(formats) {
-                    let expr = self.read_format(reader, &format)?;
-                    exprs.push(LazyValue::eager(expr.clone()));
+                    let expr = LazyValue::eager(self.read_format(reader, &format)?);
+                    exprs.push(expr.clone());
                     formats = next_formats(expr);
                 }
 
@@ -344,7 +345,9 @@ impl<'arena, 'data> Context<'arena, 'data> {
             }
             Value::FormatCond(_label, format, cond) => {
                 let value = self.read_format(reader, &self.elim_env().force_lazy(format))?;
-                let cond_res = self.elim_env().apply_closure(cond, value.clone());
+                let cond_res = self
+                    .elim_env()
+                    .apply_closure(cond, LazyValue::eager(value.clone()));
 
                 match cond_res.as_ref() {
                     Value::ConstLit(Const::Bool(true)) => Ok(value),
@@ -366,8 +369,8 @@ impl<'arena, 'data> Context<'arena, 'data> {
                 while let Some((format, next_formats)) = self.elim_env().split_telescope(formats) {
                     let mut reader = reader.clone();
 
-                    let expr = self.read_format(&mut reader, &format)?;
-                    exprs.push(LazyValue::eager(expr.clone()));
+                    let expr = LazyValue::eager(self.read_format(&mut reader, &format)?);
+                    exprs.push(expr.clone());
                     formats = next_formats(expr);
 
                     max_relative_offset =

@@ -4,6 +4,7 @@ use std::sync::Arc;
 use fxhash::FxHashMap;
 use scoped_arena::Scope;
 
+use super::semantics::{LazyValue, LocalExprs};
 use crate::core::semantics::{ArcValue, Elim, ElimEnv, Head, Value};
 use crate::core::{self, Const, Plicity, Prim, UIntStyle};
 use crate::env::{self, SharedEnv, UniqueEnv};
@@ -512,8 +513,8 @@ struct EnvBuilder<'interner, 'arena> {
     interner: &'interner RefCell<StringInterner>,
     scope: &'arena Scope<'arena>,
     meta_exprs: UniqueEnv<Option<ArcValue<'arena>>>,
-    item_exprs: UniqueEnv<ArcValue<'arena>>,
-    local_exprs: SharedEnv<ArcValue<'arena>>,
+    item_exprs: UniqueEnv<LazyValue<'arena>>,
+    local_exprs: LocalExprs<'arena>,
 }
 
 impl<'interner, 'arena> EnvBuilder<'interner, 'arena> {

@@ -21,7 +21,8 @@ use scoped_arena::Scope;
 
 use crate::alloc::SliceVec;
 use crate::core::semantics::{
-    self, ArcValue, Branches, Closure, Elim, Head, LazyValue, SplitBranches, Telescope, Value,
+    self, ArcValue, Branches, Closure, Elim, Head, ItemExprs, LazyValue, SplitBranches, Telescope,
+    Value,
 };
 use crate::core::{Prim, Term};
 use crate::env::{EnvLen, Index, Level, SharedEnv, SliceEnv, UniqueEnv};
@@ -163,7 +164,7 @@ pub struct Context<'arena, 'env> {
     /// each call to [`Context::solve`] in order to reuse previous allocations.
     renaming: &'env mut PartialRenaming,
     /// Item expressions.
-    item_exprs: &'env SliceEnv<ArcValue<'arena>>,
+    item_exprs: &'env ItemExprs<'arena>,
     /// The length of the local environment.
     local_exprs: EnvLen,
     /// Solutions for metavariables.
@@ -174,7 +175,7 @@ impl<'arena, 'env> Context<'arena, 'env> {
     pub fn new(
         scope: &'arena Scope<'arena>,
         renaming: &'env mut PartialRenaming,
-        item_exprs: &'env SliceEnv<ArcValue<'arena>>,
+        item_exprs: &'env ItemExprs<'arena>,
         local_exprs: EnvLen,
         meta_exprs: &'env mut SliceEnv<Option<ArcValue<'arena>>>,
     ) -> Context<'arena, 'env> {
@@ -353,7 +354,9 @@ impl<'arena, 'env> Context<'arena, 'env> {
         closure0: &Closure<'arena>,
         closure1: &Closure<'arena>,
     ) -> Result<(), Error> {
-        let var = Spanned::empty(Arc::new(Value::local_var(self.local_exprs.next_level())));
+        let var = LazyValue::eager(Spanned::empty(Arc::new(Value::local_var(
+            self.local_exprs.next_level(),
+        ))));
         let value0 = self.elim_env().apply_closure(closure0, var.clone());
         let value1 = self.elim_env().apply_closure(closure1, var);
 
@@ -387,7 +390,9 @@ impl<'arena, 'env> Context<'arena, 'env> {
                 return Err(error);
             }
 
-            let var = Spanned::empty(Arc::new(Value::local_var(self.local_exprs.next_level())));
+            let var = LazyValue::eager(Spanned::empty(Arc::new(Value::local_var(
+                self.local_exprs.next_level(),
+            ))));
             telescope0 = next_telescope0(var.clone());
             telescope1 = next_telescope1(var);
             self.local_exprs.push();
@@ -443,9 +448,10 @@ impl<'arena, 'env> Context<'arena, 'env> {
         body_expr: &Closure<'arena>,
         value: &ArcValue<'arena>,
     ) -> Result<(), Error> {
-        let var = Spanned::empty(Arc::new(Value::local_var(self.local_exprs.next_level())));
-        let arg = Arc::new(LazyValue::eager(var.clone()));
-        let value = self.elim_env().fun_app(plicity, value.clone(), &arg);
+        let var = LazyValue::eager(Spanned::empty(Arc::new(Value::local_var(
+            self.local_exprs.next_level(),
+        ))));
+        let value = self.elim_env().fun_app(plicity, value.clone(), &var);
         let body_expr = self.elim_env().apply_closure(body_expr, var);
 
         self.local_exprs.push();
@@ -769,8 +775,10 @@ impl PartialRenaming {
         self.target.clear();
     }
 
-    fn next_local_var<'arena>(&self) -> ArcValue<'arena> {
-        Spanned::empty(Arc::new(Value::local_var(self.source.len().next_level())))
+    fn next_local_var<'arena>(&self) -> LazyValue<'arena> {
+        LazyValue::eager(Spanned::empty(Arc::new(Value::local_var(
+            self.source.len().next_level(),
+        ))))
     }
 
     /// Set a local source variable to local target variable mapping, ensuring
