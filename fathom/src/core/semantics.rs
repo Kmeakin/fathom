@@ -21,6 +21,12 @@ pub type ArcValue<'arena> = Spanned<Arc<Value<'arena>>>;
 pub type LocalExprs<'arena> = SharedEnv<LazyValue<'arena>>;
 pub type ItemExprs<'arena> = SliceEnv<LazyValue<'arena>>;
 
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum EvalMode {
+    Lazy,
+    Strict,
+}
+
 /// Values in weak-head-normal form, with bindings converted to closures.
 #[derive(Debug, Clone)]
 pub enum Value<'arena> {
@@ -299,6 +305,7 @@ impl Error {
 /// Like the [`ElimEnv`], this allows for the running of computations, but
 /// also maintains a local environment, allowing for evaluation.
 pub struct EvalEnv<'arena, 'env> {
+    mode: EvalMode,
     elim_env: ElimEnv<'arena, 'env>,
     local_exprs: &'env mut LocalExprs<'arena>,
 }
@@ -309,8 +316,20 @@ impl<'arena, 'env> EvalEnv<'arena, 'env> {
         local_exprs: &'env mut LocalExprs<'arena>,
     ) -> EvalEnv<'arena, 'env> {
         EvalEnv {
+            mode: EvalMode::Lazy,
             elim_env,
             local_exprs,
+        }
+    }
+
+    pub fn with_mode(self, mode: EvalMode) -> Self {
+        Self { mode, ..self }
+    }
+
+    pub fn delay_or_eval(&mut self, term: &'arena Term<'arena>) -> LazyValue<'arena> {
+        match self.mode {
+            EvalMode::Lazy => self.delay(term),
+            EvalMode::Strict => LazyValue::eager(self.eval(term)),
         }
     }
 
@@ -363,7 +382,7 @@ impl<'arena, 'env> EvalEnv<'arena, 'env> {
             }
             Term::Ann(span, expr, _) => Spanned::merge(*span, self.eval(expr)),
             Term::Let(span, _, _, def_expr, body_expr) => {
-                let def_expr = self.delay(def_expr);
+                let def_expr = self.delay_or_eval(def_expr);
                 self.local_exprs.push(def_expr);
                 let body_expr = self.eval(body_expr);
                 self.local_exprs.pop();
@@ -377,7 +396,7 @@ impl<'arena, 'env> EvalEnv<'arena, 'env> {
                 Arc::new(Value::FunType(
                     *plicity,
                     *param_name,
-                    Arc::new(self.delay(param_type)),
+                    Arc::new(self.delay_or_eval(param_type)),
                     Closure::new(self.local_exprs.clone(), body_type),
                 )),
             ),
@@ -391,7 +410,7 @@ impl<'arena, 'env> EvalEnv<'arena, 'env> {
             ),
             Term::FunApp(span, plicity, head_expr, arg_expr) => {
                 let head_expr = self.eval(head_expr);
-                let arg_expr = self.delay(arg_expr);
+                let arg_expr = self.delay_or_eval(arg_expr);
                 Spanned::merge(*span, self.elim_env.fun_app(*plicity, head_expr, &arg_expr))
             }
 
@@ -400,7 +419,7 @@ impl<'arena, 'env> EvalEnv<'arena, 'env> {
                 Spanned::new(*span, Arc::new(Value::RecordType(labels, types)))
             }
             Term::RecordLit(span, labels, exprs) => {
-                let exprs = exprs.iter().map(|expr| self.delay(expr)).collect();
+                let exprs = exprs.iter().map(|expr| self.delay_or_eval(expr)).collect();
                 Spanned::new(*span, Arc::new(Value::RecordLit(labels, exprs)))
             }
             Term::RecordProj(span, head_expr, label) => {
@@ -409,7 +428,7 @@ impl<'arena, 'env> EvalEnv<'arena, 'env> {
             }
 
             Term::ArrayLit(span, exprs) => {
-                let exprs = exprs.iter().map(|expr| self.delay(expr)).collect();
+                let exprs = exprs.iter().map(|expr| self.delay_or_eval(expr)).collect();
                 Spanned::new(*span, Arc::new(Value::ArrayLit(exprs)))
             }
 
@@ -418,7 +437,7 @@ impl<'arena, 'env> EvalEnv<'arena, 'env> {
                 Spanned::new(*span, Arc::new(Value::FormatRecord(labels, formats)))
             }
             Term::FormatCond(span, name, format, cond) => {
-                let format = Arc::new(self.delay(format));
+                let format = Arc::new(self.delay_or_eval(format));
                 let cond_expr = Closure::new(self.local_exprs.clone(), cond);
                 Spanned::new(*span, Arc::new(Value::FormatCond(*name, format, cond_expr)))
             }

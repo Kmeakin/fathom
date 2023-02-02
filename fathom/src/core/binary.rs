@@ -7,7 +7,7 @@ use std::fmt::Debug;
 use std::slice::SliceIndex;
 use std::sync::Arc;
 
-use super::semantics::LocalExprs;
+use super::semantics::{EvalMode, LocalExprs};
 use crate::core::semantics::{self, ArcValue, Elim, Head, LazyValue, Value};
 use crate::core::{Const, Item, Module, Prim, Term, UIntStyle};
 use crate::env::{EnvLen, SharedEnv, UniqueEnv};
@@ -284,7 +284,7 @@ impl<'arena, 'data> Context<'arena, 'data> {
 
     fn eval_env(&mut self) -> semantics::EvalEnv<'arena, '_> {
         let elim_env = semantics::ElimEnv::new(&self.item_exprs, [][..].into());
-        semantics::EvalEnv::new(elim_env, &mut self.local_exprs)
+        semantics::EvalEnv::new(elim_env, &mut self.local_exprs).with_mode(EvalMode::Strict)
     }
 
     fn elim_env(&self) -> semantics::ElimEnv<'arena, '_> {
@@ -296,7 +296,7 @@ impl<'arena, 'data> Context<'arena, 'data> {
         for item in module.items {
             match item {
                 Item::Def { expr, .. } => {
-                    let expr = self.eval_env().delay(expr);
+                    let expr = self.eval_env().delay_or_eval(expr);
                     self.item_exprs.push(expr);
                 }
             }
