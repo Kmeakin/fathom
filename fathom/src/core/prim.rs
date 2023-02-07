@@ -3,7 +3,7 @@ use std::sync::Arc;
 use fxhash::FxHashMap;
 use scoped_arena::Scope;
 
-use super::semantics::{LazyValue, LocalExprs};
+use super::semantics::{ItemExprs, LocalExprs};
 use crate::core::semantics::{ArcValue, Elim, ElimEnv, Head, Value};
 use crate::core::{self, Const, Plicity, Prim, UIntStyle};
 use crate::env::{self, SharedEnv, UniqueEnv};
@@ -509,7 +509,7 @@ struct EnvBuilder<'arena> {
     entries: FxHashMap<Symbol, (Prim, ArcValue<'arena>)>,
     scope: &'arena Scope<'arena>,
     meta_exprs: UniqueEnv<Option<ArcValue<'arena>>>,
-    item_exprs: UniqueEnv<LazyValue<'arena>>,
+    item_exprs: ItemExprs<'arena>,
     local_exprs: LocalExprs<'arena>,
 }
 

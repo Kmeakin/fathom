@@ -20,8 +20,8 @@ pub struct Module<'arena> {
 pub enum Item<'arena> {
     /// Top-level definitions
     Def {
-        /// The label that identifies this definition
-        label: Symbol,
+        /// The name that identifies this definition
+        name: Symbol,
         /// The type of the defined expression
         r#type: &'arena Term<'arena>,
         /// The defined expression

@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 //! Determination of elaboration order and cycle detection.
 //!
 //! This module determines the order in which elaboration should proceed, given

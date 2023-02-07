@@ -11,6 +11,11 @@ use crate::BUG_REPORT_URL;
 /// Elaboration diagnostic messages.
 #[derive(Debug, Clone)]
 pub enum Message {
+    DuplicateItem {
+        name: Symbol,
+        first_range: FileRange,
+        duplicate_range: FileRange,
+    },
     /// The name was not previously bound in the current scope.
     UnboundName {
         range: FileRange,
@@ -145,6 +150,21 @@ impl Message {
         let secondary_label = |range: &FileRange| Label::secondary(range.file_id(), *range);
 
         match self {
+            Message::DuplicateItem {
+                name,
+                first_range,
+                duplicate_range,
+            } => {
+                let name = name.resolve();
+                Diagnostic::error()
+                    .with_message(format!("duplicate definition for `{name}`"))
+                    .with_labels(vec![
+                        primary_label(duplicate_range),
+                        secondary_label(first_range)
+                            .with_message(format!("`{name}` already defined here")),
+                    ])
+            }
+
             Message::UnboundName {
                 range,
                 name,
@@ -449,6 +469,8 @@ impl Message {
             }
             Message::UnsolvedMetaVar { source } => {
                 let (range, source_name) = match source {
+                    MetaSource::DefParamType(range, _) => (range, "type of definition parameter"),
+                    MetaSource::DefRetType(range, _) => (range, "type of definition"),
                     MetaSource::ImplicitArg(range, _) => (range, "implicit argument"),
                     MetaSource::HoleExpr(range, _) => (range, "hole expression"),
                     MetaSource::PlaceholderExpr(range) => (range, "placeholder expression"),

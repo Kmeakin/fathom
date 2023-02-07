@@ -1,0 +1,16 @@
+stdout = '''
+def factorial : U32 -> U32 = fun x => match x {
+    0 => 0,
+    _ => x * reported_error,
+};
+'''
+stderr = '''
+error: expression was applied to an unexpected argument
+  ┌─ tests/succeed/recursive-defs/factorial-synth.fathom:9:24
+  │
+9 │     _ => x * factorial (x - 1),
+  │              --------- ^^^^^^^ unexpected argument
+  │              │          
+  │              expression of type ?0
+
+'''

@@ -67,14 +67,10 @@ impl<'arena> Context {
 
     fn item(&'arena self, item: &Item<'arena>) -> RcDoc {
         match item {
-            Item::Def {
-                label,
-                r#type,
-                expr,
-            } => RcDoc::concat([
+            Item::Def { name, r#type, expr } => RcDoc::concat([
                 RcDoc::text("def"),
                 RcDoc::space(),
-                self.ann_pattern(Prec::Top, Some(*label), r#type),
+                self.ann_pattern(Prec::Top, Some(*name), r#type),
                 RcDoc::space(),
                 RcDoc::text("="),
                 RcDoc::softline(),

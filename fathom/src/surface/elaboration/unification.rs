@@ -568,6 +568,7 @@ impl<'arena, 'env> Context<'arena, 'env> {
             Value::Stuck(head, spine) => {
                 let head_expr = match head {
                     Head::Prim(prim) => Term::Prim(span, *prim),
+                    Head::ItemVar(var) => Term::ItemVar(span, *var),
                     Head::LocalVar(source_var) => match self.renaming.get_as_index(*source_var) {
                         None => return Err(RenameError::EscapingLocalVar(*source_var)),
                         Some(target_var) => Term::LocalVar(span, target_var),

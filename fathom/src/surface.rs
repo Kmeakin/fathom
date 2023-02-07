@@ -176,6 +176,13 @@ impl<Range: Clone> Pattern<Range> {
             | Pattern::BooleanLiteral(range, _) => range.clone(),
         }
     }
+
+    fn name(&self) -> Option<Symbol> {
+        match self {
+            Pattern::Name(_, name) => Some(*name),
+            _ => None,
+        }
+    }
 }
 
 /// Surface terms.

@@ -1,0 +1,10 @@
+// TODO: would postponment allow this to type-check?
+
+//~ mode = "module"
+//~ allow-errors = true
+
+def factorial
+= fun (x : U32) => match x {
+    0 => (0 : U32),
+    _ => x * factorial (x - 1),
+};

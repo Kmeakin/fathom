@@ -23,17 +23,21 @@
 use std::str::FromStr;
 use std::sync::Arc;
 
+use fxhash::FxHashMap;
 use scoped_arena::Scope;
 
+use super::{ExprField, ItemDef};
 use crate::alloc::SliceVec;
-use crate::core::semantics::{self, ArcValue, Head, LazyValue, LocalExprs, Telescope, Value};
+use crate::core::semantics::{
+    self, ArcValue, Head, ItemExprs, LazyValue, LocalExprs, Telescope, Value,
+};
 use crate::core::{self, prim, Const, Plicity, Prim, UIntStyle};
 use crate::env::{self, EnvLen, Level, SharedEnv, UniqueEnv};
 use crate::files::FileId;
 use crate::source::{BytePos, ByteRange, FileRange, Span, Spanned};
 use crate::surface::elaboration::reporting::Message;
 use crate::surface::{
-    distillation, pretty, BinOp, ExprField, FormatField, Item, Module, Param, Pattern, Term,
+    distillation, pretty, BinOp, FormatField, Item, Module, Param, Pattern, Term,
 };
 use crate::symbol::Symbol;
 
@@ -48,7 +52,7 @@ pub struct ItemEnv<'arena> {
     /// Types of items.
     types: UniqueEnv<ArcValue<'arena>>,
     /// Expressions of items.
-    exprs: UniqueEnv<LazyValue<'arena>>,
+    exprs: ItemExprs<'arena>,
 }
 
 impl<'arena> ItemEnv<'arena> {
@@ -61,16 +65,38 @@ impl<'arena> ItemEnv<'arena> {
         }
     }
 
+    fn reserve(&mut self, additional: usize) {
+        self.names.reserve(additional);
+        self.types.reserve(additional);
+        self.exprs.reserve(additional);
+    }
+
     fn push_definition(&mut self, name: Symbol, r#type: ArcValue<'arena>, expr: LazyValue<'arena>) {
         self.names.push(name);
         self.types.push(r#type);
         self.exprs.push(expr);
     }
 
-    fn reserve(&mut self, additional: usize) {
-        self.names.reserve(additional);
-        self.types.reserve(additional);
-        self.exprs.reserve(additional);
+    fn get_definition(&self, name: Symbol) -> Option<(ArcValue<'arena>, LazyValue<'arena>)> {
+        let level = self.names.elem_level(&name)?;
+        let r#type = self.types.get_level(level)?;
+        let expr = self.exprs.get_level(level)?;
+        Some((r#type.clone(), expr.clone()))
+    }
+
+    fn set_type(&mut self, name: Symbol, r#type: ArcValue<'arena>) {
+        let level = self.names.elem_level(&name).expect("Unbound item");
+        self.types.set_level(level, r#type);
+    }
+
+    fn set_definition(&mut self, name: Symbol, r#type: ArcValue<'arena>, expr: LazyValue<'arena>) {
+        let level = self.names.elem_level(&name).expect("Unbound item");
+        self.types.set_level(level, r#type);
+        self.exprs.set_level(level, expr);
+    }
+
+    fn len(&self) -> EnvLen {
+        self.names.len()
     }
 }
 
@@ -98,6 +124,12 @@ struct LocalEnv<'arena> {
     /// Expressions that will be substituted for local variables during
     /// [evaluation][semantics::EvalEnv::eval].
     exprs: LocalExprs<'arena>,
+}
+
+impl<'arena> Default for LocalEnv<'arena> {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl<'arena> LocalEnv<'arena> {
@@ -172,6 +204,11 @@ impl<'arena> LocalEnv<'arena> {
 /// The reason why a metavariable was inserted.
 #[derive(Debug, Copy, Clone)]
 pub enum MetaSource {
+    /// The type of a parameter to a topelevel definition.
+    DefParamType(FileRange, Symbol),
+    /// The return type of a toplevel definition.
+    DefRetType(FileRange, Symbol),
+    /// The expression of an implicit argument.
     ImplicitArg(FileRange, Option<Symbol>),
     /// The type of a hole.
     HoleType(FileRange, Symbol),
@@ -194,7 +231,9 @@ pub enum MetaSource {
 impl MetaSource {
     pub fn range(&self) -> FileRange {
         match self {
-            MetaSource::ImplicitArg(range, _)
+            MetaSource::DefParamType(range, _)
+            | MetaSource::DefRetType(range, _)
+            | MetaSource::ImplicitArg(range, _)
             | MetaSource::HoleType(range, _)
             | MetaSource::HoleExpr(range, _)
             | MetaSource::PlaceholderType(range)
@@ -629,7 +668,193 @@ impl<'arena> Context<'arena> {
         }
     }
 
+    fn check_item_duplicates(
+        &mut self,
+        items: &[Item<'arena, ByteRange>],
+    ) -> Vec<ItemDef<'arena, ByteRange>> {
+        let num_items = items
+            .iter()
+            .filter(|item| !matches!(item, Item::ReportedError(..)))
+            .count();
+
+        let mut defs = Vec::with_capacity(num_items);
+        let mut name_to_item: FxHashMap<Symbol, ItemDef<ByteRange>> =
+            FxHashMap::with_capacity_and_hasher(num_items, Default::default());
+
+        for item in items {
+            match item {
+                Item::ReportedError(_) => {}
+                Item::Def(item) => {
+                    let (range, name) = item.label;
+                    match name_to_item.get(&name) {
+                        Some(def) => {
+                            self.push_message(Message::DuplicateItem {
+                                name,
+                                first_range: self.file_range(def.label.0),
+                                duplicate_range: self.file_range(range),
+                            });
+                        }
+                        None => {
+                            name_to_item.insert(name, item.clone());
+                            defs.push(item.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        defs
+    }
+
     /// Elaborate a module.
+    pub fn elab_module<'out_arena>(
+        &mut self,
+        scope: &'out_arena Scope<'out_arena>,
+        surface_module: &Module<'arena, ByteRange>,
+        on_message: &mut dyn FnMut(Message),
+    ) -> core::Module<'out_arena> {
+        // check for duplicates
+        let items = self.check_item_duplicates(surface_module.items);
+
+        // generate metavars for each def
+        let metavars: Vec<_> = items
+            .iter()
+            .map(|def| {
+                let (range, name) = def.label;
+
+                let source = MetaSource::DefRetType(self.file_range(range), name);
+                let mut r#type = self.push_unsolved_term(source, self.universe.clone());
+
+                for param in def.params.iter().rev() {
+                    let file_range = self.file_range(param.pattern.range());
+                    let source = MetaSource::DefParamType(file_range, name);
+                    let param_type = self.push_unsolved_term(source, self.universe.clone());
+
+                    r#type = core::Term::FunType(
+                        Span::Empty,
+                        param.plicity,
+                        param.pattern.name(),
+                        self.scope.to_scope(param_type),
+                        self.scope.to_scope(r#type),
+                    );
+                }
+
+                let expr = LazyValue::eager(Spanned::empty(Arc::new(Value::item_var(
+                    self.item_env.len().next_level(),
+                ))));
+
+                let type_value = self.eval_env().eval(&r#type);
+
+                self.item_env
+                    .push_definition(name, type_value.clone(), expr);
+
+                type_value
+            })
+            .collect();
+
+        // elaborate each def
+        let items: Vec<_> = items
+            .into_iter()
+            .zip(metavars.into_iter())
+            .map(|(item, metavar)| {
+                let (_, name) = item.label;
+
+                match (&item.params, item.r#type) {
+                    // synth, no params
+                    (&[], None) => {
+                        let expr = self.check(item.expr, &metavar);
+                        let expr = self.scope.to_scope(expr);
+                        let expr_value = self.eval_env().delay(expr);
+
+                        let r#type_value = self.elim_env().force_metas(&metavar);
+                        let r#type = self.quote_env().quote(self.scope, &r#type_value);
+                        let r#type = self.scope.to_scope(r#type);
+
+                        self.item_env.set_definition(name, type_value, expr_value);
+                        core::Item::Def { name, r#type, expr }
+                    }
+                    // synth, params
+                    (&[_, ..], None) => {
+                        let expr = self.check_fun_lit(item.range, item.params, item.expr, &metavar);
+                        let expr = self.scope.to_scope(expr);
+                        let expr_value = self.eval_env().delay(expr);
+
+                        let r#type_value = self.elim_env().force_metas(&metavar);
+                        let r#type = self.quote_env().quote(self.scope, &r#type_value);
+                        let r#type = self.scope.to_scope(r#type);
+
+                        self.item_env.set_definition(name, type_value, expr_value);
+                        core::Item::Def { name, r#type, expr }
+                    }
+                    // check, no params
+                    (&[], Some(r#type)) => {
+                        let r#type = self.check(r#type, &self.universe.clone());
+
+                        let r#type = self.scope.to_scope(r#type);
+                        let r#type_value = self.eval_env().eval(r#type);
+                        self.item_env.set_type(name, r#type_value.clone());
+
+                        let expr = self.check(item.expr, &r#type_value);
+                        let expr = self.coerce(item.range, expr, &r#type_value, &metavar);
+
+                        let expr = self.scope.to_scope(expr);
+                        let expr_value = self.eval_env().delay(expr);
+
+                        self.item_env.set_definition(name, type_value, expr_value);
+                        core::Item::Def { name, r#type, expr }
+                    }
+                    // check, params
+                    (&[_, ..], Some(r#type)) => {
+                        let (expr, r#type) =
+                            self.synth_fun_lit(item.range, item.params, item.expr, Some(r#type));
+
+                        let r#type = self.scope.to_scope(r#type);
+                        let r#type_value = self.eval_env().eval(r#type);
+
+                        let expr = self.coerce(item.range, expr, &r#type_value, &metavar);
+
+                        let expr = self.scope.to_scope(expr);
+                        let expr_value = self.eval_env().delay(expr);
+
+                        self.item_env.set_definition(name, type_value, expr_value);
+                        core::Item::Def { name, r#type, expr }
+                    }
+                }
+            })
+            .collect();
+
+        // unfold metavars in each def
+        let items = items.into_iter().map(|def| {
+            match def {
+                core::Item::Def {
+                    name: label,
+                    r#type,
+                    expr,
+                } => {
+                    // TODO: Unfold unsolved metas to reported errors
+                    let r#type = self.eval_env().unfold_metas(scope, r#type);
+                    let expr = self.eval_env().unfold_metas(scope, expr);
+
+                    core::Item::Def {
+                        name: label,
+                        r#type: scope.to_scope(r#type),
+                        expr: scope.to_scope(expr),
+                    }
+                }
+            }
+        });
+        let items = scope.to_scope_from_iter(items);
+
+        self.handle_messages(on_message);
+
+        // TODO: Clear environments
+        // TODO: Reset scopes
+
+        core::Module { items }
+    }
+
+    /// Elaborate a module.
+    #[cfg(FALSE)]
     pub fn elab_module<'out_arena>(
         &mut self,
         scope: &'out_arena Scope<'out_arena>,
@@ -733,6 +958,7 @@ impl<'arena> Context<'arena> {
         expected_type: &ArcValue<'arena>,
     ) -> CheckedPattern {
         let file_range = self.file_range(pattern.range());
+        let expected_type = self.elim_env().force_metas(expected_type);
         match pattern {
             Pattern::Name(_, name) => CheckedPattern::Binder(file_range, *name),
             Pattern::Placeholder(_) => CheckedPattern::Placeholder(file_range),
@@ -748,9 +974,10 @@ impl<'arena> Context<'arena> {
                     // Some((Prim::Array64Type, [len, _])) => todo!(),
                     Some((Prim::ReportedError, _)) => None,
                     _ => {
+                        let expected_type = self.pretty_value(&expected_type);
                         self.push_message(Message::StringLiteralNotSupported {
                             range: file_range,
-                            expected_type: self.pretty_value(expected_type),
+                            expected_type,
                         });
                         None
                     }
@@ -775,9 +1002,10 @@ impl<'arena> Context<'arena> {
                     Some((Prim::F64Type, [])) => self.parse_number(*range, *lit, Const::F64),
                     Some((Prim::ReportedError, _)) => None,
                     _ => {
+                        let expected_type = self.pretty_value(&expected_type);
                         self.push_message(Message::NumericLiteralNotSupported {
                             range: file_range,
-                            expected_type: self.pretty_value(expected_type),
+                            expected_type,
                         });
                         None
                     }
@@ -1338,8 +1566,9 @@ impl<'arena> Context<'arena> {
                         r#type.clone(),
                     );
                 }
-                if let Some((term, r#type)) = self.get_item_name(*name) {
-                    return (core::Term::ItemVar(file_range.into(), term), r#type.clone());
+                if let Some((var, r#type)) = self.get_item_name(*name) {
+                    let r#type = r#type.clone();
+                    return (core::Term::ItemVar(file_range.into(), var), r#type.clone());
                 }
                 if let Some((prim, r#type)) = self.prim_env.get_name(*name) {
                     return (core::Term::Prim(file_range.into(), prim), r#type.clone());

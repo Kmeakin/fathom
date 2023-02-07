@@ -218,7 +218,7 @@ impl<'surface, 'core> Driver<'surface, 'core> {
             self.emit_core_module(&module);
         }
 
-        self.surface_scope.reset(); // Reuse the surface scope for distillation
+        // self.surface_scope.reset(); // Reuse the surface scope for distillation
         let context = context.distillation_context(&self.surface_scope);
         let module = context.distill_module(&module);
 
@@ -334,7 +334,7 @@ impl<'surface, 'core> Driver<'surface, 'core> {
 
         // Render the data we have read
         for (pos, parsed_refs) in refs.into_iter().sorted_by_key(|(pos, _)| *pos) {
-            self.surface_scope.reset(); // Reuse the surface scope for distillation
+            // self.surface_scope.reset(); // Reuse the surface scope for distillation
 
             let exprs = parsed_refs.iter().map(|parsed_ref| {
                 let core_scope = &self.core_scope;

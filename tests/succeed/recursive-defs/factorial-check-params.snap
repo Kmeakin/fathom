@@ -1,0 +1,7 @@
+stdout = '''
+def factorial : U32 -> U32 = fun x => match x {
+    0 => 0,
+    _ => x * factorial (x - (1 : U32)),
+};
+'''
+stderr = ''

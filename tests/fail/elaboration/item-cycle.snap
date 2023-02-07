@@ -1,9 +1,15 @@
 stdout = ''
 stderr = '''
-error: cycle detected
- = first → second → third → first
+error: failed to infer type of definition
+  ┌─ tests/fail/elaboration/item-cycle.fathom:4:5
+  │
+4 │ def first = second;
+  │     ^^^^^ unsolved type of definition
 
-error: cycle detected
- = a → b → c → d → b
+error: failed to infer type of definition
+   ┌─ tests/fail/elaboration/item-cycle.fathom:13:5
+   │
+13 │ def a = b;
+   │     ^ unsolved type of definition
 
 '''

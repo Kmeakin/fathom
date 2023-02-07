@@ -137,17 +137,13 @@ impl<'arena, 'env> Context<'arena, 'env> {
         let scope = self.scope;
 
         let items = core_module.items.iter().map(|item| match item {
-            core::Item::Def {
-                label,
-                r#type,
-                expr,
-            } => {
+            core::Item::Def { name, r#type, expr } => {
                 let r#type = scope.to_scope(self.check_prec(Prec::Top, r#type));
                 let expr = scope.to_scope(self.check_prec(Prec::Let, expr));
 
                 Item::Def(ItemDef {
                     range: (),
-                    label: ((), *label),
+                    label: ((), *name),
                     params: &[],
                     r#type: Some(r#type),
                     expr,
@@ -254,6 +250,15 @@ impl<'arena, 'env> Context<'arena, 'env> {
         Term::Tuple((), exprs)
     }
 
+    /// Wrap a term in parens.
+    fn paren(&self, wrap: bool, term: Term<'arena, ()>) -> Term<'arena, ()> {
+        if wrap {
+            Term::Paren((), self.scope.to_scope(term))
+        } else {
+            term
+        }
+    }
+
     fn synth_format_fields(
         &mut self,
         labels: &[Symbol],
@@ -310,15 +315,6 @@ impl<'arena, 'env> Context<'arena, 'env> {
         self.truncate_local(initial_local_len);
 
         format_fields
-    }
-
-    /// Wrap a term in parens.
-    fn paren(&self, wrap: bool, term: Term<'arena, ()>) -> Term<'arena, ()> {
-        if wrap {
-            Term::Paren((), self.scope.to_scope(term))
-        } else {
-            term
-        }
     }
 
     fn term_prec(&mut self, mode: Mode, prec: Prec, term: &core::Term<'_>) -> Term<'arena, ()> {

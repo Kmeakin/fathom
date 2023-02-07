@@ -10,7 +10,7 @@ use scoped_arena::Scope;
 
 use crate::alloc::SliceVec;
 use crate::core::{prim, Const, LocalInfo, Plicity, Prim, Term};
-use crate::env::{EnvLen, Index, Level, SharedEnv, SliceEnv};
+use crate::env::{EnvLen, Index, Level, SharedEnv, SliceEnv, UniqueEnv};
 use crate::source::{Span, Spanned};
 use crate::symbol::Symbol;
 
@@ -19,7 +19,7 @@ use crate::symbol::Symbol;
 pub type ArcValue<'arena> = Spanned<Arc<Value<'arena>>>;
 
 pub type LocalExprs<'arena> = SharedEnv<LazyValue<'arena>>;
-pub type ItemExprs<'arena> = SliceEnv<LazyValue<'arena>>;
+pub type ItemExprs<'arena> = UniqueEnv<LazyValue<'arena>>;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum EvalMode {
@@ -125,6 +125,10 @@ impl<'arena> Value<'arena> {
         Value::Stuck(Head::Prim(prim), params)
     }
 
+    pub fn item_var(level: Level) -> Value<'arena> {
+        Value::Stuck(Head::ItemVar(level), Vec::new())
+    }
+
     pub fn local_var(level: Level) -> Value<'arena> {
         Value::Stuck(Head::LocalVar(level), Vec::new())
     }
@@ -152,6 +156,8 @@ pub enum Head {
     Prim(Prim),
     /// Variables that refer to local binders.
     LocalVar(Level),
+    /// Variables that refer to toplevel definitions.
+    ItemVar(Level),
     /// Variables that refer to unsolved unification problems.
     MetaVar(Level), // TODO: Use a RefCell here?
 }
@@ -505,12 +511,20 @@ impl<'arena, 'env> ElimEnv<'arena, 'env> {
 
     fn get_item_expr(&self, var: Level) -> &'env LazyValue<'arena> {
         let value = self.item_exprs.get_level(var);
-        value.unwrap_or_else(|| panic_any(Error::UnboundItemVar))
+        match value {
+            None => panic!("Unbound item variable: {var:?}",),
+            Some(expr) => expr,
+        }
     }
 
     fn get_meta_expr(&self, var: Level) -> &'env Option<ArcValue<'arena>> {
         let value = self.meta_exprs.get_level(var);
-        value.unwrap_or_else(|| panic_any(Error::UnboundMetaVar))
+        value.unwrap_or_else(|| {
+            panic!(
+                "Unbound metavariable: {var:?}. Maximum metavar is {:?}",
+                self.meta_exprs.len()
+            )
+        })
     }
 
     /// Bring a value up-to-date with any new unification solutions that
@@ -880,8 +894,12 @@ impl<'in_arena, 'env> QuoteEnv<'in_arena, 'env> {
             Head::Prim(prim) => Term::Prim(span, *prim),
             Head::LocalVar(var) => match self.local_exprs.level_to_index(*var) {
                 Some(var) => Term::LocalVar(span, var),
-                None => panic_any(Error::UnboundLocalVar),
+                None => panic!(
+                    "Unbound local variable: {var:?}\nLocal env length: {:?}",
+                    self.local_exprs
+                ),
             },
+            Head::ItemVar(var) => Term::ItemVar(span, *var),
             Head::MetaVar(var) if self.unfold_metas => {
                 match self.elim_env.get_meta_expr(*var) {
                     // The metavariable has a solution, so unfold it.

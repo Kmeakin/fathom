@@ -1,0 +1,7 @@
+//~ mode = "module"
+
+def factorial (x : U32) : U32
+= match x {
+    0 => 0,
+    _ => x * (factorial (u32_sub x 1)),
+};

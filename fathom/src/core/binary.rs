@@ -7,7 +7,7 @@ use std::fmt::Debug;
 use std::slice::SliceIndex;
 use std::sync::Arc;
 
-use super::semantics::{EvalMode, LocalExprs};
+use super::semantics::{EvalMode, ItemExprs, LocalExprs};
 use crate::core::semantics::{self, ArcValue, Elim, Head, LazyValue, Value};
 use crate::core::{Const, Item, Module, Prim, Term, UIntStyle};
 use crate::env::{EnvLen, SharedEnv, UniqueEnv};
@@ -255,7 +255,7 @@ impl fmt::Display for BufferError {
 impl std::error::Error for BufferError {}
 
 pub struct Context<'arena, 'data> {
-    item_exprs: UniqueEnv<LazyValue<'arena>>,
+    item_exprs: ItemExprs<'arena>,
     local_exprs: LocalExprs<'arena>,
     initial_buffer: Buffer<'data>,
     pending_formats: Vec<(usize, ArcValue<'arena>)>,
@@ -296,7 +296,7 @@ impl<'arena, 'data> Context<'arena, 'data> {
         for item in module.items {
             match item {
                 Item::Def { expr, .. } => {
-                    let expr = self.eval_env().delay_or_eval(expr);
+                    let expr = self.eval_env().delay(expr);
                     self.item_exprs.push(expr);
                 }
             }
@@ -328,6 +328,7 @@ impl<'arena, 'data> Context<'arena, 'data> {
             Value::Stuck(Head::Prim(prim), slice) => {
                 self.read_prim(reader, *prim, slice, format.span())
             }
+            Value::Stuck(Head::ItemVar(var), _) => todo!(),
             Value::FormatRecord(labels, formats) => {
                 let mut formats = formats.clone();
                 let mut exprs = Vec::with_capacity(formats.len());
